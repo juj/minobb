@@ -358,6 +358,28 @@ int main()
 		printf("\n");
 	}
 
+	// Nearly-planar regression test: a flat triangle, a point 1e-5 above it
+	// (numerically coplanar "internal" hull edges) and a point well below.
+	// The true minimum volume is 6.0890 (independent double-precision search);
+	// the pre-fix code returned 10.15 (2D planar fallback) or bailed out.
+	{
+		const float delta = 1e-5f;
+		const float pts[] = {
+			0.f, 0.f, 0.f,
+			2.f, 0.f, 0.f,
+			0.f, 2.f, 0.f,
+			0.9f, 1.1f, delta,
+			1.3f, -0.2f, -2.f };
+		vec3 p[5] = { vec3(0,0,0), vec3(2,0,0), vec3(0,2,0), vec3(0.9f,1.1f,delta), vec3(1.3f,-0.2f,-2.f) };
+		OBB o = minobb((float *)pts, 5, 12);
+		printf("near-planar: volume = %.6f\n", o.Volume());
+		CHECK(!o.IsDegenerate(), "near-planar: OBB is degenerate");
+		CHECK(encloses(o, p, 5), "near-planar: OBB does not enclose all points");
+		CHECK(fabsf(o.Volume() - 6.089046f) / 6.089046f < 0.01f,
+			"near-planar: volume %.6f should be ~6.089 (true minimum)", o.Volume());
+		printf("\n");
+	}
+
 	if (g_numFailures == 0)
 	{
 		printf("ALL TESTS PASSED\n");

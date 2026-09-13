@@ -273,7 +273,7 @@ struct Hull3
 	bool IsDegenerate() const { return v.size() <= 3 || f.empty(); }
 };
 
-Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
+Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
 	Hull3 hull;
 
@@ -428,7 +428,43 @@ Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 		}
 	}
 
+	// Remove vertices not referenced by any face (points that turned out to be
+	// interior during the incremental construction). The original
+	// Polyhedron::ConvexHull stores only the actual hull vertices; keeping the
+	// interior points around would make the antipodal search below O(E*n) in
+	// the input size instead of O(E*V_hull).
+	{
+		std::vector<unsigned char> used(hull.v.size(), 0);
+		for (size_t fi = 0; fi < hull.f.size(); ++fi)
+			for (size_t j = 0; j < hull.f[fi].size(); ++j)
+				used[hull.f[fi][j]] = 1;
+		std::vector<int> remap(hull.v.size(), -1);
+		std::vector<vec3> newV;
+		newV.reserve(hull.v.size());
+		for (size_t i = 0; i < hull.v.size(); ++i)
+			if (used[i])
+			{
+				remap[i] = (int)newV.size();
+				newV.push_back(hull.v[i]);
+			}
+		for (size_t fi = 0; fi < hull.f.size(); ++fi)
+			for (size_t j = 0; j < hull.f[fi].size(); ++j)
+				hull.f[fi][j] = remap[hull.f[fi][j]];
+		hull.v.swap(newV);
+	}
+
 	return hull;
+}
+
+Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
+{
+	// Note: MathGeoLib's Polyhedron::ConvexHull is an incremental algorithm whose
+	// exact vertex set for nearly-degenerate inputs is path-dependent (initial
+	// tetrahedron from 14 fixed directions + RNG-ordered conflict processing with
+	// inPlaneEpsilon = 1e-4). We build the exact hull of the input instead; for
+	// well-conditioned point sets (the intended use case) the two agree, and the
+	// OBB search below is robust to the extra nearly-coplanar vertices.
+	return BuildHull3Core(ptsIn);
 }
 
 // ----------------------------------------------------------------------------
@@ -574,6 +610,171 @@ OBB SmallestOBBVolume2DPlanar(const std::vector<vec3> &pointArray)
 	vec3 edgeA, edgeB;
 	SmallestOBBVolumeJiggle(commonPlaneNormal, pointArray, pts, edgeA, edgeB);
 	return FixedOrientationEnclosingOBB(pointArray, edgeA, edgeB);
+}
+
+// 2D convex hull (monotone chain) of projected points. Returns the hull in
+// CCW order without repeating the first point. Collinear points are dropped.
+static std::vector<float2> ConvexHull2D(const std::vector<float2> &pts)
+{
+	int n = (int)pts.size();
+	if (n < 3)
+		return pts;
+	std::vector<float2> s = pts;
+	std::sort(s.begin(), s.end(), [](const float2 &a, const float2 &b)
+	{
+		return a.x < b.x || (a.x == b.x && a.y < b.y);
+	});
+	std::vector<float2> h;
+	h.reserve(2 * n);
+	for (int i = 0; i < n; ++i)
+	{
+		while (h.size() >= 2 && (h[h.size()-1] - h[h.size()-2]).PerpDot(s[i] - h[h.size()-2]) <= 0.f)
+			h.pop_back();
+		h.push_back(s[i]);
+	}
+	int lower = (int)h.size();
+	for (int i = n - 2; i >= 0; --i)
+	{
+		while ((int)h.size() > lower && (h[h.size()-1] - h[h.size()-2]).PerpDot(s[i] - h[h.size()-2]) <= 0.f)
+			h.pop_back();
+		h.push_back(s[i]);
+	}
+	if (!h.empty())
+		h.pop_back();
+	return h;
+}
+
+// Coarse-to-fine sphere sweep used as a fallback when the category search finds
+// no configuration at all. For nearly-planar hulls the numerically coplanar
+// faces break the flush-edge structure the category search relies on, and the
+// planar 2D fallback (which assumes a truly flat input) is off by tens of
+// percent. Given a box axis n1, the optimal box is exact: (range along n1)
+// times (minimum-area rectangle of the projection on the plane perpendicular
+// to n1). So a dense sweep of n1 plus an exact in-plane min-rectangle gives a
+// high-quality box. Only used for small hulls (the cost is ~V^2 per sample).
+static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
+{
+	const int V = (int)pts.size();
+	OBB empty;
+	if (V < 4 || V > 96)
+		return empty;
+
+	// Center the points for numerical hygiene.
+	vec3 c(0.f, 0.f, 0.f);
+	for (int i = 0; i < V; ++i)
+		c += pts[i];
+	c *= (1.f / (float)V);
+	std::vector<vec3> q(V);
+	for (int i = 0; i < V; ++i)
+		q[i] = pts[i] - c;
+
+	// For direction n1: return the volume of the optimal box with that axis,
+	// and the min-rectangle side direction w in the perpendicular plane.
+	auto eval = [&](const vec3 &n1, float &vol, vec3 &w)
+	{
+		vec3 up = Absf(n1.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f);
+		vec3 u = Normalized(vec3::Cross(n1, up));
+		vec3 v = vec3::Cross(n1, u);
+		float amin = FLT_MAX, amax = -FLT_MAX;
+		std::vector<float2> proj(V);
+		for (int i = 0; i < V; ++i)
+		{
+			float a = q[i].Dot(n1);
+			if (a < amin) amin = a;
+			if (a > amax) amax = a;
+			proj[i] = float2(q[i].Dot(u), q[i].Dot(v));
+		}
+		std::vector<float2> h = ConvexHull2D(proj);
+		int m = (int)h.size();
+		if (m < 3)
+		{
+			vol = 0.f; // Degenerate projection; the caller handles it.
+			w = u;
+			return;
+		}
+		float bestArea = FLT_MAX;
+		float2 bestE = h[0] - h[1];
+		for (int i = 0; i < m; ++i)
+		{
+			float2 e = (h[(i + 1) % m] - h[i]).Normalized();
+			float2 p = e.Rotated90CCW();
+			float umn = FLT_MAX, umx = -FLT_MAX, pmn = FLT_MAX, pmx = -FLT_MAX;
+			for (int j = 0; j < m; ++j)
+			{
+				float2 d = h[j] - h[i];
+				float uu = d.Dot(e);
+				float pp = d.Dot(p);
+				if (uu < umn) umn = uu;
+				if (uu > umx) umx = uu;
+				if (pp < pmn) pmn = pp;
+				if (pp > pmx) pmx = pp;
+			}
+			float area = (umx - umn) * (pmx - pmn);
+			if (area < bestArea)
+			{
+				bestArea = area;
+				bestE = e;
+			}
+		}
+		vol = (amax - amin) * bestArea;
+		w = u * bestE.x + v * bestE.y;
+	};
+
+	// Coarse full-sphere grid (3 degrees), then local tangent-space refinement.
+	vec3 bestN = vec3(0.f, 0.f, 1.f);
+	float bestVol = -1.f;
+	for (int i = 0; i <= 60; ++i)
+	{
+		float th = (float)i * (3.14159265358979f / 180.f);
+		float st = sinf(th), ct = cosf(th);
+		for (int j = 0; j < 120; ++j)
+		{
+			float ph = (float)j * (2.f * 3.14159265358979f / 120.f);
+			vec3 n1(st * cosf(ph), st * sinf(ph), ct);
+			float vol;
+			vec3 w;
+			eval(n1, vol, w);
+			if (vol > 0.f && (bestVol < 0.f || vol < bestVol))
+			{
+				bestVol = vol;
+				bestN = n1;
+			}
+		}
+	}
+	for (int lvl = 0; lvl < 5 && bestVol > 0.f; ++lvl)
+	{
+		float half = 1.5f * powf(0.1f, (float)lvl); // degrees
+		vec3 t1 = Normalized(vec3::Cross(bestN, Absf(bestN.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f)));
+		vec3 t2 = vec3::Cross(bestN, t1);
+		float lv = bestVol;
+		vec3 ln = bestN;
+		for (int i = -10; i <= 10; ++i)
+			for (int j = -10; j <= 10; ++j)
+			{
+				float a = (float)i * (half * 3.14159265358979f / 180.f);
+				float b = (float)j * (half * 3.14159265358979f / 180.f);
+				vec3 n1 = Normalized(bestN + t1 * sinf(a) + t2 * sinf(b));
+				float vol;
+				vec3 w;
+				eval(n1, vol, w);
+				if (vol > 0.f && vol < lv)
+				{
+					lv = vol;
+					ln = n1;
+				}
+			}
+		bestVol = lv;
+		bestN = ln;
+	}
+	if (bestVol <= 0.f)
+		return empty;
+
+	// Build the final box from the best axis: n1 plus the exact min-rectangle
+	// side direction, retightened against all input points.
+	float vol;
+	vec3 w;
+	eval(bestN, vol, w);
+	return FixedOrientationEnclosingOBB(pts, Normalized(bestN), Normalized(w));
 }
 
 // Moves the floating point sign bit from src to dst.
@@ -949,10 +1150,20 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 
 	// Stores for each edge index i the complete list of antipodal vertices for that edge.
 	std::vector<std::vector<int>> antipodalPointsForEdge(E);
-	// Naive O(E*V) search (equivalent to the original's graph search, see
-	// NAIVE_ANTIPODAL_SEARCH in OBB.cpp).
+	// Naive O(E*V) search (a superset of the original's graph search, see
+	// NAIVE_ANTIPODAL_SEARCH in OBB.cpp). Supersets are safe: the lists are only
+	// used to search for the minimum along an axis, and extra (non-extreme)
+	// candidates can never lower that minimum below the true hull minimum.
 	for (int i = 0; i < E; ++i)
 	{
+		// Skip internal (numerically coplanar) edges: when f1a == f1b the
+		// antipodal predicate degenerates and misclassifies the edge's own
+		// endpoints as antipodal, which the original code interprets as
+		// "degenerate planar input" and bails out. The original's graph search
+		// never reaches these vertices, and the lists of internal edges are
+		// never used downstream (all category loops skip internal edges).
+		if (isInternalEdge(i))
+			continue;
 		vec3 f1a = faceNormals[facesForEdge[i].first];
 		vec3 f1b = faceNormals[facesForEdge[i].second];
 		for (int j = 0; j < V; ++j)
@@ -1380,9 +1591,17 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 
 	OBB optimalObb = OptimalEnclosingOBB3D(convexHull);
 	if (optimalObb.IsDegenerate())
-		// The input is very close to planar but that was not detected above in the convex
-		// hull computation.
-		return SmallestOBBVolume2DPlanar(points);
+	{
+		// The category search found no configuration at all. For nearly-planar hulls the
+		// numerically coplanar faces can break the flush-edge structure it relies on, and
+		// the 2D planar path below assumes truly flat input. Try a coarse sphere sweep
+		// (exact given each candidate axis) first, and keep the better of the two.
+		OBB sweep = CoarseSweepEnclosingOBB(convexHull.v);
+		OBB planar = SmallestOBBVolume2DPlanar(points);
+		if (!sweep.IsDegenerate() && sweep.Volume() < planar.Volume())
+			return sweep;
+		return planar;
+	}
 	else
 	{
 		// Retighten the best box: recompute the extents of the found orientation with
