@@ -709,6 +709,7 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 {
 	const int V = (int)pts.size();
 	OBB empty;
+	empty.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX); // IsDegenerate() == true
 	if (V < 4 || V > 96)
 		return empty;
 
@@ -1640,10 +1641,12 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 		// The category search found no configuration at all. For nearly-planar hulls the
 		// numerically coplanar faces can break the flush-edge structure it relies on, and
 		// the 2D planar path below assumes truly flat input. Try a coarse sphere sweep
-		// (exact given each candidate axis) first, and keep the better of the two.
+		// (exact given each candidate axis) first, and keep the better of the two. The
+		// volume > 0 check rejects the sweep's "no result" sentinel, which can otherwise
+		// (volume 0) beat any real box in the comparison below.
 		OBB sweep = CoarseSweepEnclosingOBB(convexHull.v);
 		OBB planar = SmallestOBBVolume2DPlanar(points);
-		if (!sweep.IsDegenerate() && sweep.Volume() < planar.Volume())
+		if (!sweep.IsDegenerate() && sweep.Volume() > 0.f && sweep.Volume() < planar.Volume())
 			return sweep;
 		return planar;
 	}
