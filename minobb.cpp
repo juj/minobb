@@ -28,6 +28,43 @@
 #include <cfloat>
 #include <cstring>
 
+// ----------------------------------------------------------------------------
+// vec3 and OBB implementations
+// ----------------------------------------------------------------------------
+
+float dot(const vec3 &a, const vec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+vec3 cross(const vec3 &a, const vec3 &b)
+{
+	return vec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
+}
+
+float OBB::Volume() const
+{
+	return (r.x * 2.f) * (r.y * 2.f) * (r.z * 2.f);
+}
+
+bool OBB::IsDegenerate() const
+{
+	return r.x < 0.f || r.y < 0.f || r.z < 0.f;
+}
+
+vec3 OBB::LocalToWorldInverse(const vec3 &p) const
+{
+	vec3 d = p - pos;
+	return vec3(dot(axis[0], d), dot(axis[1], d), dot(axis[2], d));
+}
+
+float OBB::Distance(const vec3 &p) const
+{
+	vec3 q = LocalToWorldInverse(p);
+	float dx = q.x > r.x ? q.x - r.x : (q.x < -r.x ? -r.x - q.x : 0.f);
+	float dy = q.y > r.y ? q.y - r.y : (q.y < -r.y ? -r.y - q.y : 0.f);
+	float dz = q.z > r.z ? q.z - r.z : (q.z < -r.z ? -r.z - q.z : 0.f);
+	return (dx*dx > 0.f || dy*dy > 0.f || dz*dz > 0.f)
+		? (float)std::sqrt((double)dx*dx + (double)dy*dy + (double)dz*dz) : 0.f;
+}
+
 namespace
 {
 
@@ -71,7 +108,7 @@ vec3 Perpendicular(const vec3 &v)
 	const float ax = Absf(v.x), ay = Absf(v.y), az = Absf(v.z);
 	vec3 dir = (ax < ay && ax < az) ? vec3(1.f, 0.f, 0.f) :
 	           (ay < az)           ? vec3(0.f, 1.f, 0.f) : vec3(0.f, 0.f, 1.f);
-	return vec3::Cross(dir, v);
+	return cross(dir, v);
 }
 
 // Computes an orthonormal basis (outU, outV) perpendicular to this vector
@@ -80,7 +117,7 @@ vec3 Perpendicular(const vec3 &v)
 void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
 {
 	outU = Normalized(Perpendicular(v));
-	outV = Normalized(vec3::Cross(outU, v));
+	outV = Normalized(cross(outU, v));
 }
 
 // ----------------------------------------------------------------------------
@@ -305,10 +342,10 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 			{
 				vec3 a = pts[j] - pts[i];
 				vec3 b = pts[k] - pts[i];
-				float abArea = LengthSq(vec3::Cross(a, b));
+				float abArea = LengthSq(cross(a, b));
 				for (int l = k + 1; l < n && ia == -1; ++l)
 				{
-					float det = Absf(vec3::Dot(vec3::Cross(a, b), pts[l] - pts[i]));
+					float det = Absf(dot(cross(a, b), pts[l] - pts[i]));
 					// Require a non-degenerate volume relative to the point spread.
 					if (det > 1e-10f * scale * (1.f + abArea))
 					{
@@ -337,8 +374,8 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	// from the interior, i.e. away from the given reference point `ref`).
 	auto addFace = [&](int a, int b, int c, int ref)
 	{
-		vec3 n = vec3::Cross(hull.v[b] - hull.v[a], hull.v[c] - hull.v[a]);
-		if (vec3::Dot(n, hull.v[ref] - hull.v[a]) > 0.f)
+		vec3 n = cross(hull.v[b] - hull.v[a], hull.v[c] - hull.v[a]);
+		if (dot(n, hull.v[ref] - hull.v[a]) > 0.f)
 			std::swap(b, c); // Normal points towards the interior, flip.
 		hull.f.push_back({ a, b, c });
 	};
@@ -359,9 +396,9 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		for (size_t fi = 0; fi < hull.f.size(); ++fi)
 		{
 			const std::vector<int> &face = hull.f[fi];
-			vec3 n = Normalized(vec3::Cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]));
+			vec3 n = Normalized(cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]));
 			// Distance from q to the face plane (positive = outside the hull).
-			float dist = n.Dot(q - hull.v[face[0]]);
+			float dist = dot(n, q - hull.v[face[0]]);
 			if (dist > 1e-6f * scale)
 				visible.push_back((int)fi);
 		}
@@ -414,13 +451,13 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	for (size_t fi = 0; fi < hull.f.size(); ++fi)
 	{
 		std::vector<int> &face = hull.f[fi];
-		vec3 n = vec3::Cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]);
+		vec3 n = cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]);
 		for (size_t vi = 0; vi < hull.v.size(); ++vi)
 		{
 			int idx = (int)vi;
 			if (idx == face[0] || idx == face[1] || idx == face[2])
 				continue;
-			if (n.Dot(hull.v[idx] - hull.v[face[0]]) > 1e-9f * (1.f + LengthSq(n)) * scale)
+			if (dot(n, hull.v[idx] - hull.v[face[0]]) > 1e-9f * (1.f + LengthSq(n)) * scale)
 			{
 				std::swap(face[1], face[2]);
 				break;
@@ -489,7 +526,7 @@ void ExtremePointsAlongDirection(const std::vector<vec3> &points, const vec3 &di
 	largestD = -FLT_MAX;
 	for (int i = 0; i < n; ++i)
 	{
-		float d = vec3::Dot(points[i], dir);
+		float d = dot(points[i], dir);
 		if (d < smallestD)
 		{
 			smallestD = d;
@@ -518,13 +555,13 @@ float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointA
 		int e1, e2;
 		float dummy1, dummy2;
 		ExtremePointsAlongDirection(pointArray, edge, e1, e2, dummy1, dummy2);
-		float edgeLength = Absf(vec3::Dot(pointArray[e1] - pointArray[e2], edge));
+		float edgeLength = Absf(dot(pointArray[e1] - pointArray[e2], edge));
 
 		vec3 u, v;
 		PerpendicularBasis(edge, u, v);
 
 		for (int k = 0; k < numPoints; ++k)
-			pts[k] = float2(vec3::Dot(u, pointArray[k]), vec3::Dot(v, pointArray[k]));
+			pts[k] = float2(dot(u, pointArray[k]), dot(v, pointArray[k]));
 
 		float2 rectCenter, uDir, vDir;
 		float minU = 0.f, maxU = 0.f, minV = 0.f, maxV = 0.f;
@@ -532,8 +569,8 @@ float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointA
 		float2 c10 = float2((maxV - minV) * vDir.x, (maxV - minV) * vDir.y);
 		float2 c20 = float2((maxU - minU) * uDir.x, (maxU - minU) * uDir.y);
 
-		vec3 edge1BackIn3D = c10.x * u + c10.y * v;
-		vec3 edge2BackIn3D = c20.x * u + c20.y * v;
+		vec3 edge1BackIn3D = u * c10.x + v * c10.y;
+		vec3 edge2BackIn3D = u * c20.x + v * c20.y;
 
 		float volume = (float)sqrt((double)LengthSq(edge1BackIn3D)) *
 		               (float)sqrt((double)LengthSq(edge2BackIn3D)) * edgeLength;
@@ -541,10 +578,10 @@ float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointA
 		if (volume < bestVolume)
 		{
 			bestVolume = volume;
-			edgeFirstChoice = uDir.x * u + uDir.y * v;
+			edgeFirstChoice = u * uDir.x + v * uDir.y;
 			Normalize(edgeFirstChoice);
 
-			edgeSecondChoice = vDir.x * u + vDir.y * v;
+			edgeSecondChoice = u * vDir.x + v * vDir.y;
 			Normalize(edgeSecondChoice);
 
 			outEdgeA = edge;
@@ -570,10 +607,10 @@ OBB SmallestOBBVolume2DPlanar(const std::vector<vec3> &pointArray)
 	vec3 commonPlaneNormal;
 	for (int i = 2; i < numPoints; ++i)
 	{
-		vec3 normal = vec3::Cross(pointArray[i] - pointArray[i-2], pointArray[i] - pointArray[i-1]);
+		vec3 normal = cross(pointArray[i] - pointArray[i-2], pointArray[i] - pointArray[i-1]);
 		if (Normalize(normal) > 1e-12f)
 		{
-			if (vec3::Dot(commonPlaneNormal, normal) >= 0.f)
+			if (dot(commonPlaneNormal, normal) >= 0.f)
 				commonPlaneNormal += normal;
 			else
 				commonPlaneNormal -= normal;
@@ -673,16 +710,16 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 	auto eval = [&](const vec3 &n1, float &vol, vec3 &w)
 	{
 		vec3 up = Absf(n1.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f);
-		vec3 u = Normalized(vec3::Cross(n1, up));
-		vec3 v = vec3::Cross(n1, u);
+		vec3 u = Normalized(cross(n1, up));
+		vec3 v = cross(n1, u);
 		float amin = FLT_MAX, amax = -FLT_MAX;
 		std::vector<float2> proj(V);
 		for (int i = 0; i < V; ++i)
 		{
-			float a = q[i].Dot(n1);
+			float a = dot(q[i], n1);
 			if (a < amin) amin = a;
 			if (a > amax) amax = a;
-			proj[i] = float2(q[i].Dot(u), q[i].Dot(v));
+			proj[i] = float2(dot(q[i], u), dot(q[i], v));
 		}
 		std::vector<float2> h = ConvexHull2D(proj);
 		int m = (int)h.size();
@@ -744,8 +781,8 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 	for (int lvl = 0; lvl < 5 && bestVol > 0.f; ++lvl)
 	{
 		float half = 1.5f * powf(0.1f, (float)lvl); // degrees
-		vec3 t1 = Normalized(vec3::Cross(bestN, Absf(bestN.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f)));
-		vec3 t2 = vec3::Cross(bestN, t1);
+		vec3 t1 = Normalized(cross(bestN, Absf(bestN.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f)));
+		vec3 t2 = cross(bestN, t1);
 		float lv = bestVol;
 		vec3 ln = bestN;
 		for (int i = -10; i <= 10; ++i)
@@ -806,14 +843,14 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 		vec3 e = f3b;
 		vec3 f = f3a - f3b;
 
-		float g = a.Dot(c)*d.Dot(e) - a.Dot(d)*c.Dot(e);
-		float h = a.Dot(c)*d.Dot(f) - a.Dot(d)*c.Dot(f);
-		float i = b.Dot(c)*d.Dot(e) - b.Dot(d)*c.Dot(e);
-		float j = b.Dot(c)*d.Dot(f) - b.Dot(d)*c.Dot(f);
+		float g = dot(a, c)*dot(d, e) - dot(a, d)*dot(c, e);
+		float h = dot(a, c)*dot(d, f) - dot(a, d)*dot(c, f);
+		float i = dot(b, c)*dot(d, e) - dot(b, d)*dot(c, e);
+		float j = dot(b, c)*dot(d, f) - dot(b, d)*dot(c, f);
 
-		float k = g*b.Dot(e) - a.Dot(e)*i;
-		float l = h*b.Dot(e) + g*b.Dot(f) - a.Dot(f)*i - a.Dot(e)*j;
-		float m = h*b.Dot(f) - a.Dot(f)*j;
+		float k = g*dot(b, e) - dot(a, e)*i;
+		float l = h*dot(b, e) + g*dot(b, f) - dot(a, f)*i - dot(a, e)*j;
+		float m = h*dot(b, f) - dot(a, f)*j;
 
 		float s = l*l - 4.f*m*k;
 
@@ -822,7 +859,7 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 			// The equation is linear instead.
 			float v = -k / l;
 			float t = -(g + h*v) / (i + j*v);
-			float u = -(c.Dot(e) + c.Dot(f)*v) / (d.Dot(e) + d.Dot(f)*v);
+			float u = -(dot(c, e) + dot(c, f)*v) / (dot(d, e) + dot(d, f)*v);
 			int nSolutions = 0;
 			// If we happened to divide by zero above, the following checks handle them.
 			if (v >= -eps && t >= -eps && u >= -eps && v <= 1.f + eps && t <= 1.f + eps && u <= 1.f + eps)
@@ -830,9 +867,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 				n1[0] = Normalized(a + b*t);
 				n2[0] = Normalized(c + d*u);
 				n3[0] = Normalized(e + f*v);
-				if (Absf(n1[0].Dot(n2[0])) < angleEps
-					&& Absf(n1[0].Dot(n3[0])) < angleEps
-					&& Absf(n2[0].Dot(n3[0])) < angleEps)
+				if (Absf(dot(n1[0], n2[0])) < angleEps
+					&& Absf(dot(n1[0], n3[0])) < angleEps
+					&& Absf(dot(n2[0], n3[0])) < angleEps)
 					return 1;
 				else
 					return 0;
@@ -850,8 +887,8 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 		float T1 = -(g + h*V1) / (i + j*V1);
 		float T2 = -(g + h*V2) / (i + j*V2);
 
-		float U1 = -(c.Dot(e) + c.Dot(f)*V1) / (d.Dot(e) + d.Dot(f)*V1);
-		float U2 = -(c.Dot(e) + c.Dot(f)*V2) / (d.Dot(e) + d.Dot(f)*V2);
+		float U1 = -(dot(c, e) + dot(c, f)*V1) / (dot(d, e) + dot(d, f)*V1);
+		float U2 = -(dot(c, e) + dot(c, f)*V2) / (dot(d, e) + dot(d, f)*V2);
 
 		int nSolutions = 0;
 		if (V1 >= -eps && T1 >= -eps && U1 >= -eps && V1 <= 1.f + eps && T1 <= 1.f + eps && U1 <= 1.f + eps)
@@ -860,9 +897,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 			n2[nSolutions] = Normalized(c + d*U1);
 			n3[nSolutions] = Normalized(e + f*V1);
 
-			if (Absf(n1[nSolutions].Dot(n2[nSolutions])) < angleEps
-				&& Absf(n1[nSolutions].Dot(n3[nSolutions])) < angleEps
-				&& Absf(n2[nSolutions].Dot(n3[nSolutions])) < angleEps)
+			if (Absf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
+				&& Absf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
+				&& Absf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
 				++nSolutions;
 		}
 		if (V2 >= -eps && T2 >= -eps && U2 >= -eps && V2 <= 1.f + eps && T2 <= 1.f + eps && U2 <= 1.f + eps)
@@ -870,9 +907,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 			n1[nSolutions] = Normalized(a + b*T2);
 			n2[nSolutions] = Normalized(c + d*U2);
 			n3[nSolutions] = Normalized(e + f*V2);
-			if (Absf(n1[nSolutions].Dot(n2[nSolutions])) < angleEps
-				&& Absf(n1[nSolutions].Dot(n3[nSolutions])) < angleEps
-				&& Absf(n2[nSolutions].Dot(n3[nSolutions])) < angleEps)
+			if (Absf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
+				&& Absf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
+				&& Absf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
 				++nSolutions;
 		}
 		if (s < 1e-4f && nSolutions == 2)
@@ -887,10 +924,10 @@ bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a,
 {
 	const vec3 f1a_f1b = f1a - f1b;
 	const vec3 f2a_f2b = f2a - f2b;
-	float a = f1b.Dot(f2b);
-	float b = (f1a_f1b).Dot(f2b);
-	float c = (f2a_f2b).Dot(f1b);
-	float d = (f1a_f1b).Dot(f2a_f2b);
+	float a = dot(f1b, f2b);
+	float b = dot(f1a_f1b, f2b);
+	float c = dot(f2a_f2b, f1b);
+	float d = dot(f1a_f1b, f2a_f2b);
 
 	/*
 		n1 = f1a*t + f1b*(1-t) = f1b + (f1a-f1b)*t
@@ -943,13 +980,13 @@ bool AreCompatibleOpposingEdges(const vec3 &f1a, const vec3 &f1b, const vec3 &f2
 	const vec3 col2 = f2a - f2b;
 	const vec3 rhs = -f1b;
 
-	float det = vec3::Dot(col0, vec3::Cross(col1, col2));
+	float det = dot(col0, cross(col1, col2));
 	if (Absf(det) < 1e-12f)
 		return false;
 
-	float c  = vec3::Dot(rhs,   vec3::Cross(col1, col2)) / det;
-	float t  = vec3::Dot(col0,  vec3::Cross(rhs,   col2)) / det;
-	float cu = vec3::Dot(col0,  vec3::Cross(col1,  rhs))  / det;
+	float c  = dot(rhs,   cross(col1, col2)) / det;
+	float t  = dot(col0,  cross(rhs,   col2)) / det;
+	float cu = dot(col0,  cross(col1,  rhs))  / det;
 
 	if (c <= 0.f || t < 0.f || t > 1.f)
 		return false;
@@ -994,8 +1031,8 @@ bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const std::vect
 				0 <= -f1b.e
 		*/
 		vec3 e = v[neighbors[i]] - vert;
-		float s = f1b_f1a.Dot(e);
-		float n = f1b.Dot(e);
+		float s = dot(f1b_f1a, e);
+		float n = dot(f1b, e);
 		const float epsilon = 1e-4f;
 		if (s > epsilon)
 			tMax = Minf(tMax, n / s);
@@ -1019,20 +1056,20 @@ void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 	float *minVolume, OBB *minOBB)
 {
 	// Compute the most extreme points in each direction.
-	float maxN1 = n1.Dot(hullV[edges[edgeI].first]);
-	float maxN2 = n2.Dot(hullV[edges[edgeJ].first]);
-	float maxN3 = n3.Dot(hullV[edges[edgeK].first]);
+	float maxN1 = dot(n1, hullV[edges[edgeI].first]);
+	float maxN2 = dot(n2, hullV[edges[edgeJ].first]);
+	float maxN3 = dot(n3, hullV[edges[edgeK].first]);
 	auto minAlong = [&](const vec3 &dir, const std::vector<int> &candidates)
 	{
 		float m = FLT_MAX;
 		if (candidates.empty())
 		{
 			for (const vec3 &p : hullV)
-				m = Minf(m, dir.Dot(p));
+				m = Minf(m, dot(dir, p));
 		}
 		else
 			for (size_t l = 0; l < candidates.size(); ++l)
-				m = Minf(m, dir.Dot(hullV[candidates[l]]));
+				m = Minf(m, dot(dir, hullV[candidates[l]]));
 		return m;
 	};
 	float minN1 = minAlong(n1, antipodalPointsForEdge[edgeI]);
@@ -1047,7 +1084,7 @@ void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 		minOBB->r.x = (maxN1 - minN1) * 0.5f;
 		minOBB->r.y = (maxN2 - minN2) * 0.5f;
 		minOBB->r.z = (maxN3 - minN3) * 0.5f;
-		minOBB->pos = (minN1 + minOBB->r.x)*n1 + (minN2 + minOBB->r.y)*n2 + (minN3 + minOBB->r.z)*n3;
+		minOBB->pos = n1 * (minN1 + minOBB->r.x) + n2 * (minN2 + minOBB->r.y) + n3 * (minN3 + minOBB->r.z);
 		*minVolume = volume;
 	}
 }
@@ -1092,7 +1129,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	{
 		if (hull.f[i].size() < 3)
 			return minOBB; // Degenerate face, cannot process.
-		faceNormals[i] = Normalized(vec3::Cross(vtx[hull.f[i][1]] - vtx[hull.f[i][0]],
+		faceNormals[i] = Normalized(cross(vtx[hull.f[i][1]] - vtx[hull.f[i][0]],
 		                                       vtx[hull.f[i][2]] - vtx[hull.f[i][0]]));
 	}
 
@@ -1145,7 +1182,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		const std::pair<int, int> &ff = facesForEdge[i];
 		if (ff.second < 0)
 			return true; // Should not happen for a closed hull.
-		return faceNormals[ff.first].Dot(faceNormals[ff.second]) > 1.f - 1e-4f;
+		return dot(faceNormals[ff.first], faceNormals[ff.second]) > 1.f - 1e-4f;
 	};
 
 	// Stores for each edge index i the complete list of antipodal vertices for that edge.
@@ -1310,8 +1347,8 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				int edgeK = antipodalEdges[k];
 
 				vec3 n = antipodalEdgeNormals[k];
-				float minN1 = n.Dot(vtx[edges[edgeK].first]);
-				float maxN1 = n.Dot(vtx[edges[i].first]);
+				float minN1 = dot(n, vtx[edges[edgeK].first]);
+				float maxN1 = dot(n, vtx[edges[i].first]);
 
 				// Test all mutual compatible edges.
 				vec3 f3a = faceNormals[facesForEdge[edgeJ].first];
@@ -1326,8 +1363,8 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				//    v = n1.f3b / n1.(f3b-f3a)
 				// If n1.(f3b-f3a) == 0:
 				//    n1.f3b must be zero as well, then arbitrary v is ok.
-				float num = n.Dot(f3b);
-				float denom = n.Dot(f3b - f3a);
+				float num = dot(n, f3b);
+				float denom = dot(n, f3b - f3a);
 				MoveSign(num, denom);
 
 				const float epsilon = 1e-4f;
@@ -1341,37 +1378,37 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				{
 					float v = num / denom;
 					vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
-					vec3 n2 = Normalized(vec3::Cross(n3, n));
+					vec3 n2 = Normalized(cross(n3, n));
 
 					// Linear scans for the extremes along n2 (replacing the original's
 					// graph searches ExtremeVertexConvex(adjacencyData, +/-n2)).
 					float minN2 = FLT_MAX, maxN2 = -FLT_MAX;
 					for (int a = 0; a < V; ++a)
 					{
-						float d = n2.Dot(vtx[a]);
+						float d = dot(n2, vtx[a]);
 						if (d < minN2) minN2 = d;
 						if (d > maxN2) maxN2 = d;
 					}
 
-					float maxN3 = n3.Dot(vtx[edges[edgeJ].first]);
+					float maxN3 = dot(n3, vtx[edges[edgeJ].first]);
 
 					float minN3 = FLT_MAX;
 					const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edgeJ];
 					if (antipodalsEdge3.empty())
 					{
 						for (int a = 0; a < V; ++a)
-							minN3 = Minf(minN3, n3.Dot(vtx[a]));
+							minN3 = Minf(minN3, dot(n3, vtx[a]));
 					}
 					else
 					{
 						for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-							minN3 = Minf(minN3, n3.Dot(vtx[antipodalsEdge3[a]]));
+							minN3 = Minf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
 					}
 
 					float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
 					if (volume > 0.f && volume < minVolume)
 					{
-						minOBB.pos = ((minN1 + maxN1) * n + (minN2 + maxN2) * n2 + (minN3 + maxN3) * n3) * 0.5f;
+						minOBB.pos = (n * (minN1 + maxN1) + n2 * (minN2 + maxN2) + n3 * (minN3 + maxN3)) * 0.5f;
 						minOBB.axis[0] = n;
 						minOBB.axis[1] = n2;
 						minOBB.axis[2] = n3;
@@ -1413,17 +1450,17 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		const std::vector<int> &antipodals = antipodalPointsForEdge[e1];
 		const std::vector<int> &compatibleEdgesI = compatibleEdges[e1];
 
-		float maxN1 = n1.Dot(vtx[edges[e1].first]);
+		float maxN1 = dot(n1, vtx[edges[e1].first]);
 		float minN1 = FLT_MAX;
 		if (antipodals.empty())
 		{
 			for (int j = 0; j < V; ++j)
-				minN1 = Minf(minN1, n1.Dot(vtx[j]));
+				minN1 = Minf(minN1, dot(n1, vtx[j]));
 		}
 		else
 		{
 			for (size_t j = 0; j < antipodals.size(); ++j)
-				minN1 = Minf(minN1, n1.Dot(vtx[antipodals[j]]));
+				minN1 = Minf(minN1, dot(n1, vtx[antipodals[j]]));
 		}
 
 		for (size_t j = 0; j < compatibleEdgesI.size(); ++j)
@@ -1433,8 +1470,8 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			vec3 f3b = faceNormals[facesForEdge[edge3].second];
 
 			// Is edge3 compatible with direction n1?
-			float num = n1.Dot(f3b);
-			float denom = n1.Dot(f3b - f3a);
+			float num = dot(n1, f3b);
+			float denom = dot(n1, f3b - f3a);
 			float v;
 			if (!EqualAbs(denom, 0.f))
 				v = num / denom;
@@ -1445,34 +1482,34 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			if (v >= 0.f - epsilon && v <= 1.f + epsilon)
 			{
 				vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
-				vec3 n2 = Normalized(vec3::Cross(n3, n1));
+				vec3 n2 = Normalized(cross(n3, n1));
 
 				float minN2 = FLT_MAX, maxN2 = -FLT_MAX;
 				for (int a = 0; a < V; ++a)
 				{
-					float d = n2.Dot(vtx[a]);
+					float d = dot(n2, vtx[a]);
 					if (d < minN2) minN2 = d;
 					if (d > maxN2) maxN2 = d;
 				}
-				float maxN3 = n3.Dot(vtx[edges[edge3].first]);
+				float maxN3 = dot(n3, vtx[edges[edge3].first]);
 
 				float minN3 = FLT_MAX;
 				const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edge3];
 				if (antipodalsEdge3.empty())
 				{
 					for (int a = 0; a < V; ++a)
-						minN3 = Minf(minN3, n3.Dot(vtx[a]));
+						minN3 = Minf(minN3, dot(n3, vtx[a]));
 				}
 				else
 				{
 					for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-						minN3 = Minf(minN3, n3.Dot(vtx[antipodalsEdge3[a]]));
+						minN3 = Minf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
 				}
 
 				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
 				if (volume > 0.f && volume < minVolume)
 				{
-					minOBB.pos = ((minN1 + maxN1) * n1 + (minN2 + maxN2) * n2 + (minN3 + maxN3) * n3) * 0.5f;
+					minOBB.pos = (n1 * (minN1 + maxN1) + n2 * (minN2 + maxN2) + n3 * (minN3 + maxN3)) * 0.5f;
 					minOBB.axis[0] = n1;
 					minOBB.axis[1] = n2;
 					minOBB.axis[2] = n3;
@@ -1490,7 +1527,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 
 	// The search for edge triplets does not follow cross-product orientation, so
 	// fix that up at the very last step, if necessary.
-	if (vec3::Cross(minOBB.axis[0], minOBB.axis[1]).Dot(minOBB.axis[2]) < 0.f)
+	if (dot(cross(minOBB.axis[0], minOBB.axis[1]), minOBB.axis[2]) < 0.f)
 		minOBB.axis[2] = -minOBB.axis[2];
 
 	return minOBB;
@@ -1502,13 +1539,13 @@ OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3
 	float mind0, maxd0, mind1, maxd1, mind2, maxd2;
 	ExtremePointsAlongDirection(pointArray, dir0, d0, d1, mind0, maxd0);
 	ExtremePointsAlongDirection(pointArray, dir1, d0, d1, mind1, maxd1);
-	vec3 edgeC = Normalized(vec3::Cross(dir0, dir1));
+	vec3 edgeC = Normalized(cross(dir0, dir1));
 	ExtremePointsAlongDirection(pointArray, edgeC, d0, d1, mind2, maxd2);
 	float rd0 = (maxd0 - mind0) * 0.5f;
 	float rd1 = (maxd1 - mind1) * 0.5f;
 	float rd2 = (maxd2 - mind2) * 0.5f;
 	OBB minOBB;
-	minOBB.pos = (mind0 + rd0) * dir0 + (mind1 + rd1) * dir1 + (mind2 + rd2) * edgeC;
+	minOBB.pos = dir0 * (mind0 + rd0) + dir1 * (mind1 + rd1) + edgeC * (mind2 + rd2);
 	minOBB.axis[0] = dir0;
 	minOBB.axis[1] = dir1;
 	minOBB.axis[2] = edgeC;

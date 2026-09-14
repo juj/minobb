@@ -45,7 +45,7 @@ static int g_numFailures = 0;
 static vec3 toLocal(const OBB &o, const vec3 &p)
 {
 	vec3 d = p - o.pos;
-	return vec3(o.axis[0].Dot(d), o.axis[1].Dot(d), o.axis[2].Dot(d));
+	return vec3(dot(o.axis[0], d), dot(o.axis[1], d), dot(o.axis[2], d));
 }
 
 // True if the OBB is valid and encloses all points (with a small tolerance).
@@ -69,11 +69,11 @@ static bool isOrthonormal(const OBB &o)
 {
 	for (int i = 0; i < 3; ++i)
 	{
-		float len = o.axis[i].Dot(o.axis[i]);
+		float len = dot(o.axis[i], o.axis[i]);
 		if (fabsf(len - 1.f) > 1e-4f)
 			return false;
 		for (int j = i + 1; j < 3; ++j)
-			if (fabsf(o.axis[i].Dot(o.axis[j])) > 1e-4f)
+			if (fabsf(dot(o.axis[i], o.axis[j])) > 1e-4f)
 				return false;
 	}
 	return true;

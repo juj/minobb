@@ -27,8 +27,6 @@
 
 #pragma once
 
-#include <cmath>
-
 // A minimal 3-component float vector.
 struct vec3
 {
@@ -36,8 +34,6 @@ struct vec3
 
 	vec3() : x(0.f), y(0.f), z(0.f) {}
 	vec3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
-
-	float Dot(const vec3 &b) const { return x*b.x + y*b.y + z*b.z; }
 
 	vec3 operator + (const vec3 &b) const { return vec3(x + b.x, y + b.y, z + b.z); }
 	vec3 operator - (const vec3 &b) const { return vec3(x - b.x, y - b.y, z - b.z); }
@@ -51,17 +47,11 @@ struct vec3
 
 	float &operator[](int i) { float *p = &x; return p[i]; }
 	float operator[](int i) const { const float *p = &x; return p[i]; }
-
-	static float Dot(const vec3 &a, const vec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-	static vec3 Cross(const vec3 &a, const vec3 &b)
-	{
-		return vec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
-	}
 };
 
-inline vec3 operator * (float s, const vec3 &v) { return v * s; }
-inline float Dot(const vec3 &a, const vec3 &b) { return vec3::Dot(a, b); }
-inline vec3 Cross(const vec3 &a, const vec3 &b) { return vec3::Cross(a, b); }
+// Dot and cross product of two vectors.
+float dot(const vec3 &a, const vec3 &b);
+vec3 cross(const vec3 &a, const vec3 &b);
 
 // An oriented bounding box: center `pos`, half-extents `r`, orthonormal axes `axis[0..2]`.
 // Same layout/semantics as MathGeoLib's OBB (a point p is inside if all
@@ -72,28 +62,17 @@ struct OBB
 	vec3 r;       // Half extents along each axis. A component < 0 marks the OBB as invalid/degenerate.
 	vec3 axis[3]; // Orthonormal basis (rows of the LocalToWorld rotation).
 
-	float Volume() const { return (r.x * 2.f) * (r.y * 2.f) * (r.z * 2.f); }
+	// Volume of the OBB.
+	float Volume() const;
 
 	// True if the OBB is invalid (marker produced when the input is degenerate).
-	bool IsDegenerate() const { return r.x < 0.f || r.y < 0.f || r.z < 0.f; }
+	bool IsDegenerate() const;
 
 	// Local space coordinates of a world space point.
-	vec3 LocalToWorldInverse(const vec3 &p) const
-	{
-		vec3 d = p - pos;
-		return vec3(vec3::Dot(axis[0], d), vec3::Dot(axis[1], d), vec3::Dot(axis[2], d));
-	}
+	vec3 LocalToWorldInverse(const vec3 &p) const;
 
 	// Signed distance to the OBB (negative inside).
-	float Distance(const vec3 &p) const
-	{
-		vec3 q = LocalToWorldInverse(p);
-		float dx = q.x > r.x ? q.x - r.x : (q.x < -r.x ? -r.x - q.x : 0.f);
-		float dy = q.y > r.y ? q.y - r.y : (q.y < -r.y ? -r.y - q.y : 0.f);
-		float dz = q.z > r.z ? q.z - r.z : (q.z < -r.z ? -r.z - q.z : 0.f);
-		return (dx*dx > 0.f || dy*dy > 0.f || dz*dz > 0.f)
-			? (float)std::sqrt((double)dx*dx + (double)dy*dy + (double)dz*dz) : 0.f;
-	}
+	float Distance(const vec3 &p) const;
 };
 
 // Computes the minimum-volume OBB (conjectured, see Theorem 7.1 of the paper)
