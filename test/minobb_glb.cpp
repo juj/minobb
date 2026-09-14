@@ -429,22 +429,45 @@ int main(int argc, char **argv)
 		return 1;
 
 	int num_pts = (int)(pts.size() / 3);
-	printf("vertices: %d\n", num_pts);
 
-	// Compute the minimum-volume OBB.
+	// Compute the convex hull and the minimum-volume OBB.
+	Hull3 hull = convex_hull(pts.data(), num_pts, 12);
 	OBB obb = minobb(pts.data(), num_pts, 12);
-	if (obb.IsDegenerate())
-	{
-		printf("degenerate OBB\n");
-		return 0;
-	}
 
-	printf("center: %f %f %f\n", obb.pos.x, obb.pos.y, obb.pos.z);
-	printf("half extents: %f %f %f\n", obb.r.x, obb.r.y, obb.r.z);
-	printf("size: %f %f %f\n", 2.f * obb.r.x, 2.f * obb.r.y, 2.f * obb.r.z);
+	// Print the results as a single JSON document.
+	printf("{\n");
+	printf("  \"vertices\": %d,\n", num_pts);
+
+	printf("  \"hull\": {\n");
+	printf("    \"degenerate\": %s,\n", hull.IsDegenerate() ? "true" : "false");
+	printf("    \"vertices\": [");
+	for (size_t i = 0; i < hull.v.size(); i++)
+		printf("%s\n      [%.9g, %.9g, %.9g]", i ? "," : "", hull.v[i].x, hull.v[i].y, hull.v[i].z);
+	printf(hull.v.empty() ? "],\n" : "\n    ],\n");
+	printf("    \"faces\": [");
+	for (size_t i = 0; i < hull.f.size(); i++)
+	{
+		const std::vector<int> &face = hull.f[i];
+		printf("%s\n      [", i ? "," : "");
+		for (size_t j = 0; j < face.size(); j++)
+			printf("%d%s", face[j], j + 1 < face.size() ? ", " : "");
+		printf("]");
+	}
+	printf(hull.f.empty() ? "]\n" : "\n    ]\n");
+	printf("  },\n");
+
+	printf("  \"obb\": {\n");
+	printf("    \"degenerate\": %s,\n", obb.IsDegenerate() ? "true" : "false");
+	printf("    \"center\": [%.9g, %.9g, %.9g],\n", obb.pos.x, obb.pos.y, obb.pos.z);
+	printf("    \"half_extents\": [%.9g, %.9g, %.9g],\n", obb.r.x, obb.r.y, obb.r.z);
+	printf("    \"size\": [%.9g, %.9g, %.9g],\n", 2.f * obb.r.x, 2.f * obb.r.y, 2.f * obb.r.z);
+	printf("    \"axes\": [");
 	for (int i = 0; i < 3; i++)
-		printf("axis[%d]: %f %f %f\n", i, obb.axis[i].x, obb.axis[i].y, obb.axis[i].z);
-	printf("volume: %f\n", obb.Volume());
+		printf("%s\n      [%.9g, %.9g, %.9g]", i ? "," : "", obb.axis[i].x, obb.axis[i].y, obb.axis[i].z);
+	printf("\n    ],\n");
+	printf("    \"volume\": %.9g\n", obb.Volume());
+	printf("  }\n");
+	printf("}\n");
 
 	return 0;
 }
