@@ -1,0 +1,914 @@
+An Exact Algorithm for Finding Minimum Oriented Bounding Boxes
+
+                                                          Jukka Jyla¨nki
+                                                            2015/06/01
+
+Figure 1: Fast computation of the minimum volume OBB of a convex polyhedron. Left to right: Dragon: 2731149 vertices (2531 on the hull)
+  in 1.3 seconds; Lucy: 14026670 vertices (5262 on the hull) in 5.6 seconds; a bear: 3105537 vertices (6628 on the hull) in 7.3 seconds.
+                      An optimized C++ implementation of the algorithm can be found here, or try it live on a web page here.
+
+Abstract                                                                in medicine [Bartz et al. 2005]. Common uses in computer graphics
+                                                                        include approximating a complex shape with a simpler OBB for the
+A new method is presented for computing tight-fitting enclosing         purposes of faster broad phase intersection testing, or for perform-
+bounding boxes for point sets in three dimensions. The algorithm        ing culling of renderable objects that need to be sent to the GPU.
+is based on enumerating all box orientations that are uniquely de-
+termined by combinations of edges in the convex hull of the in-         OBBs have several desirable properties that make them useful for a
+put point set. By using a graph search technique over the vertex        variety of scenarios. They are convex and consist of three pairs
+graph of the hull, the iteration can be done quickly in expected        of parallel planes, called slabs. In their local coordinate frame,
+O(n3/2(log n)2) time for input point sets that have a uniform dis-      they are representable as axis-aligned bounding boxes (AABB) or if
+tribution of directions on their convex hull. Under very specific       scaled, as the unit cube. As such, intersection and distance tests be-
+conditions, the algorithm runs in worst case O(n3 log n) complex-       tween OBBs and other shapes can be implemented efficiently [Kay
+ity. Surprisingly, empirical evidence shows that this process always    and Kajiya 1986] [Schneider and Eberly 2002, pp. 394, 624, 639].
+yields the globally minimum bounding box by volume, which leads         OBBs also provide generally tighter fits than the simpler bound-
+to a conjecture that this method is in fact optimal.                    ing spheres or AABBs. However, unlike spheres and AABBs, for
+                                                                        which minimum volume enclosing shapes can be found in linear
+CR Categories: F.2.2 [Analysis of Algorithms and Problem Com-           time [Megiddo 1982] [Welzl 1991], the major shortcoming with
+plexity]: Nonnumerical Algorithms and Problems--Geometrical             OBBs to date has been the difficulty of computing minimum vol-
+Problems and Computations; I.3.5 [Computer Graphics]: Compu-            ume OBB representations due to a lack of effective algorithms for
+tational Geometry and Object Modeling--Geometric Algorithms;            the task.
+Object representations
+                                                                        In this paper, new analysis and progress is presented to help solve
+Keywords: computational geometry, bounding box, OBB                     the minimum volume OBB problem. A new algorithm is intro-
+                                                                        duced, which has considerable practical merit:
+1 Introduction
+                                                                          1. Exact: The algorithm runs through a discrete process without
+Given a three-dimensional set of points, a fundamental problem in             use of numerical optimization or iteration over the continuum.
+computational geometry is to find the smallest possible oriented              As a result, the method is stable and predictable.
+bounding box (OBB) that contains all the points in the input data
+set. This problem arises widely in applications in computer graph-        2. Simple: Unlike previously published results, the new method
+ics [Schneider and Eberly 2002], physical simulations [Ericson                is relatively easy to implement and it is possible to program
+2004] and spatial data structures [Gottschalk et al. 1996], as well as        it in different variants to balance a tradeoff between desired
+other areas, such as computer-aided design [Chan 2003] and even               implementation complexity versus runtime complexity.
+
+   e-mail:jujjyl@gmail.com                                                3. Fast: Both the time complexity and the constant time factors
+                                                                              in the algorithm are low, which make it a practically viable
+                                                                              solution.
+
+                                                                          4. Enumerative: The new algorithm is implementable as read-
+                                                                              only sequential traversal over sets of edges, so it is catego-
+                                                                              rizable as embarrassingly parallel and therefore suitable for
+                                                                              processing large data sets as well.
+
+                                                                          5. Optimal? Based on extensive numerical searches over both
+                                                                              synthetic and real world test cases, no example has yet sur-
+      faced where the new algorithm would not have found the op-          decades, developers have sought to utilize a variety of numerical
+      timal minimum volume box. However, at this point, no formal         and statistical optimization methods to find suboptimal but good
+      proof of the optimality of this algorithm is known.                 enough approximations for practical use. A basic method is to use
+                                                                          principal component analysis (PCA) to estimate the direction of
+The next section of this paper will first introduce the relevant earlier  largest spread in the point set and establish that as a cardinal di-
+research. In sections 3 and 4, the main problem will then be grad-        rection for the OBB. This process must be done using a continuous
+ually unwound in a bottom-up manner by presenting mathematical            set representation on the convex hull, or otherwise the approxima-
+analysis of each of the individual subproblems one at a time. These       tion can be unboundedly bad [Dimitrov et al. 2009]. For obtaining
+results will all be brought together in the main algorithm finally in     near-optimal results, there exists a (1 + )-approximation scheme
+section 5. Last, sections 6 and 7 conclude with experimental results      [Barequet and Har-Peled 2001], whereas for a completely oppo-
+and practical remarks.                                                    site line of approach one can embrace a carefully defined heuristic
+                                                                          to trade optimality for speed [Larsson and Ka¨llberg 2011]. There
+2 Related Work                                                            have also been attempts at providing optimal results by using so-
+                                                                          phisticated numerical techniques, such as particle swarm optimiza-
+In the past, only few papers have been published with theoretical         tion [Borckmans and Absil 2010] and genetic search [Chang et al.
+advances on the minimum volume OBB problem. In the 2D case,               2011]. These have been proven to be effective, but they have an
+it is known that the minimum area rectangle enclosing a convex            element of randomness in them and may not find the optimal box
+polygon must be flush with one of the polygon edges [Freeman              in all cases.
+and Shapira 1975]. The rotating calipers method [Toussaint
+1983] is a linear time algorithm that builds on this characterization.    The only brute force approach so far has been the exhaustive search
+For the 3D case, the only currently known property is the following:      of all orientations over SO(3, R). This space is large, but there is a
+                                                                          commonly known trick to prune it that seems to be folklore. Given
+Theorem 2.1. A box of minimal volume circumscribing a convex              a candidate orientation for the OBB, a better fit can be searched in-
+polyhedron must have at least two adjacent faces flush with edges         crementally by repeatedly projecting the model onto a plane corre-
+of the polyhedron. [O'Rourke 1985]                                        sponding to one of the main axes of the current candidate OBB and
+                                                                          solving the resulting 2D problem in linear time using Toussaint's ro-
+The term of being flush with an edge here means that a face of            tating calipers method. This reduces the brute force challenge from
+the box contains every point of that edge. Based on this prop-            SO(3, R) to a search of a good starting direction vector in the unit
+erty, O'Rourke developed a O(n3) time algorithm which performs            (hemi)sphere, which, when iterated in this manner, would "lock"
+a type of rotating calipers search for each pair of edges on the hull.    into the orientation of the optimal OBB. However the fundamental
+However, their method involves solving roots of a sixth degree            problem is still that the search is conducted over a continuous space
+trigonometric polynomial numerically, and in addition the com-            and therefore it is not exhaustible by sampling a discrete set of ori-
+plexity is so high that the method is often considered impracti-          entations. Because of this, a brute force search over orientation
+cal. Unfortunately it also looks like this work has later become          angles is not able to guarantee an optimal result.
+misinterpreted in literature in several published books, which in
+turn has led to misinformation in online sources [GameDev.Net ],          In summary, all known methods so far use either approximation,
+[StackOverflow ], [Troutman ]. To illustrate and clear up the con-        numerics or heuristics, which is unsatisfying. There is a clear need
+fusion, consider the following quotes:                                    to develop a fast and exact geometric algorithm to solve the prob-
+                                                                          lem, which will be the main motivation in the following sections.
+   · "O'Rourke (1985) shows that one box face must contain a
+      polyhedron face and another box face must contain a polyhe-         3 Mathematical Aspects
+      dron edge or three box faces must each contain a polyhedron
+      edge."" [Schneider and Eberly 2002, p. 806]                         In order to work through the details, some notation and concepts
+                                                                          need to be first introduced. Recall that the internal points of the
+   · "[...] given a polyhedron either one face and one edge or            input set do not play a role in the problem and one can restrict to
+      three edges of the polyhedron will be on different faces of its     considering only the convex hull of the point set. In fact, for the
+      bounding box." [Ericson 2004, p.107]                                new algorithm, computing the convex hull is the required first step,
+                                                                          since the algorithm is built to operate on the edges of a convex poly-
+   · "The paper [O'R85] shows that the minimum-volume OBB                 hedron. The convex hull can be computed in expected O(n log n)
+      for a convex polyhedron must (1) have a face that is coincident     time for example by using the quickhull algorithm [Barber et al.
+      with a face of the polyhedron or (2) be supported by three mu-      1996].
+      tually perpendicular edges of the polyhedron." [Eberly 2006,
+      p. 624] (see also [Geometric Tools LLC ])                           For each direction vector n, one or more vertices of the polyhe-
+                                                                          dron can be identified as the most extreme points to the direction
+The first quote is possibly correct, however this does not follow         of n. These are called supporting vertices, and will be denoted by
+from theorem 2.1 or the treatise in [O'Rourke 1985]. In fact, if it       Supp(n). If for two vertices v1 and v2 there exists a direction n
+did, then it would directly prove the optimality of the new algorithm     such that v1  Supp(n) and v2  Supp(-n), then v1 and v2 are
+presented in this paper. The second claim on the other hand is not        said to be antipodal. Geometrically described, two vertices are an-
+correct. Note the very subtle difference between the first two quotes     tipodal if it is possible to find an orientation for an enclosing OBB
+that makes them different. It is possible that two adjacent faces of      such that the two vertices of the hull lie on opposing faces of the
+a box are flush with the same edge of a polyhedron, in the special        OBB.
+case that this polyhedron edge coincides with an edge of the box.
+This counterexample will be called category D, and it will be pre-        In this paper, a new concept is introduced that is in some ways sim-
+sented in more detail later in section 5. See also figure 2. Finally,     ilar to antipodality. If for two vertices v1 and v2 there exists two di-
+the third statement is likewise a misinterpretation of O'Rourke, and      rections n1 and n2 such that v1  Supp(n1) and v2  Supp(n2)
+mathematically incorrect. The correct analysis will be presented in       and n1 · n2 = 0, then v1 and v2 are said to be sidepodal. The geo-
+section 3.5.                                                              metric meaning of this is that two vertices are said to be sidepodal
+                                                                          if it is possible to find an orientation for an enclosing OBB where
+Given that the problem has resisted attempts of solving for several
+the OBB touches both vertices v1 and v2 on two adjacent faces of         Proof. By lemma 3.1, the normal vector n2 of the face of an OBB
+the OBB.                                                                 that is flush with an edge e has the parametrization n2 = f <(e) +
+                                                                          f >(e)-f <(e) t. The vertex v is sidepodal to edge e if and only
+The concepts of support, antipodality and sidepodality are naturally     if there exists a direction n such that v  Supp(n) and n · n2 = 0.
+extended to also refer to edges (and faces) of the hull. For example,    Substituting the formula of the normal gives the equation
+one may refer to an edge e being sidepodal to a vertex v, if it is
+possible to orient an OBB to be flush with e and v on two adjacent        n · f <(e) + f >(e) - f <(e)  t = 0, where t  [0, 1] . (1)
+faces of the OBB.
+                                                                         The left-hand side is an expression linear to t, so its extremes are
+If x is a vertex or an edge of the hull, then the set of all antipodal   at t = 0 and t = 1, and they correspond to values n · f <(e) and
+vertices in the hull to x will be denoted by AntiV(x) and the set of     n · f >(e). Therefore according to Bolzano's theorem, equation (1)
+all antipodal edges in the hull to x will be denoted by AntiE(x).        has a solution if and only if one of these values is nonnegative and
+Likewise, the sets SideV(x) and SideE(x) will refer to the sets of       the other is nonpositive. In other words, either
+all sidepodal vertices and respectively edges to x. Also, it will be
+necessary to examine set intersections of these sidepodal sets, so as      1. n · f <(e)  0 and n · f >(e)  0, or
+a notational aid, SideV(e1, e2) will be used as a shorthand to refer
+to the set intersection SideV(e1)  SideV(e2). It is immediately            2. n · f <(e)  0 and n · f >(e)  0.
+clear that if edge e : v0  v1 is an antipodal or a sidepodal edge to
+a feature x, then both vertices v0 and v1 of e immediately have the      Then, in either case multiplying the two expressions together yields
+same property. More precisely:                                           the desired result.
+
+   · If e  AntiE(x), then {v0, v1}  AntiV(x),                            Antipodality and sidepodality both form symmetric nontransitive
+                                                                         relations for vertices and edges of the hull. The new algorithm will
+   · if e  SideE(x), then {v0, v1}  SideV(x), and                        be based on computationally resolving these relations on the vertex
+                                                                         graph of the convex hull. Therefore the rest of this section will fo-
+   · if e  SideE(x1, x2), then {v0, v1}  SideV(x1, x2).                  cus on the mathematical study of these properties which will enable
+                                                                         the development of suitable algorithms to enumerate these sets.
+This may seem trivial, but it is worth explicitly noting since this
+makes traversing sidepodal and antipodal edges effectively identi-       3.1 Antipodal Edge and Vertex
+cal to traversing the sets of vertices. Note that for the sidepodality
+relation, the opposite is not true, i.e. even if two neighboring ver-    Given an edge e and a vertex v of a convex polyhedron, it is possible
+tices are sidepodal to a feature x, it does not necessarily follow that  to formulate a precise test whether e and v are antipodal partners to
+the edge connecting them would be sidepodal to x as well.                each other. This involves finding a common normal vector n for
+                                                                         which e  Supp(n) and v  Supp(-n), or concluding that such
+The notation N (v) will be used to refer to the set of vertex            a vector does not exist. The first condition is fulfilled if and only if
+neighbors of vertex v. Given an edge e, the angle measured from          the direction n satisfies the parametrization of lemma 3.1, whereas
+inside of the hull between the two adjacent faces connected to e is      the second condition is met if and only if all vertex neighbors w of
+commonly called the dihedral angle of edge e. Because the hull           vertex v are in the negative halfspace of the plane defined by v and
+is convex, all dihedral angles are in the range of ]0, 180[ degrees.     -n. This gives the following set of conditions:
+Finally, the face normals of the two adjacent faces to e pointing
+outwards of the hull will be denoted by f <(e) and f >(e). These              n = f <(e) + f >(e) - f <(e)  t , where t  [0, 1] ,
+normal vectors define the following simple property that will be              (v - w) · n  0  w  N (v) .
+useful later.
+                                                                         The set of equations defined on the second line generates a set of
+Lemma 3.1. If a face of an OBB is flush with an edge e of the            intervals, one for each neighbor in N (v), that the parameter t must
+convex hull, then the (unnormalized) normal vector n of that face        lie in for the solution to be valid. When codified, it turns into a test
+of the OBB is equal to n = f <(e) + f >(e) - f <(e)  t for some          of whether the range intervals have a non-degenerate overlap. This
+t  [0, 1].                                                               procedure is shown in algorithm 1.
+
+Proof. This formula for the normal follows directly from linear in-      Algorithm 1: AreAntipodal(v,e)
+terpolation. The value of t = 0 corresponds to the case when the         let t- = 0
+OBB is flush with the face with normal f <(e), and the value of          let t+ = 1.0
+t = 1 corresponds to the OBB being flush with the face with the          for w  N (v) do
+normal f >(e). Since the dihedral angle of the edge is never 0, the
+linear interpolation will not produce a degenerate zero vector.               let p = f <(e) · (w - v)
+                                                                              let q = f <(e) - f >(e) · (w - v)
+While it would be possible to choose a parametrization based on               if q > 0 then
+angle, or another that would preserve the magnitude of the normal
+vector, either would greatly complicate later analysis, which is why               t+ = M in(t+, p/q)
+this presentation is preferred instead.                                       else if q < 0 then
+
+There exists an interesting geometric way to relate sidepodality of                t- = M ax(t-, p/q)
+a vertex and an edge to the support function.                                 else if p < 0 then
+
+Lemma 3.2. Given a vertex v and an edge e on a convex polyhe-                      return false
+dron, the vertex v  SideV(e) if and only if there exists a direction
+vector n for which v  Supp(n) and n · f <(e) n · f >(e)  0.              return t-  t+
+3.2 Antipodal Pair of Edges                                             square. This leads to a quick test that samples all these four corner
+                                                                        points of potential extrema and checks the signs of the result. If the
+Testing whether given two edges e1 and e2 of a convex polyhedron        signs are different, then again due to Bolzano's theorem, a solution
+are antipodal is also straightforward. Geometrically reasoning, it      must exist to equation 3. A programmatic way to test this is shown
+is immediate that if an OBB is flush with two edges e1 and e2 on        in algorithm 3.
+opposite faces of the box, then the normal vector n1 of one of these
+faces is perpendicular to both e1 and e2, and therefore the direction   Algorithm 3: AreSidepodal(e1, e2)
+of n1 is given by the cross product of the two edge vectors. That is,   let a = f >(e1) · f >(e2)
+n1 = c  e1 × e2 for some constant c. This direction is uniquely         let b = f <(e1) - f >(e1) · f >(e2)
+defined, and to see whether the configuration is physically valid,      let c = f <(e2) - f >(e2) · f >(e1)
+it remains only to test whether a box laid out in this orientation      let d = f <(e1) - f >(e1) · f <(e2) - f >(e2)
+intersects the inside of the polyhedron. A special case occurs when     let v- = M in(a, a + b, a + c, a + b + c + d)
+e1 is parallel to e2, in which case the cross product is degenerate     let v+ = M ax(a, a + b, a + c, a + b + c + d)
+and the box is free to "hinge" around in contact with the two edges.    return v-  0 and v+  0
+Testing whether intersection occurs can be achieved by using the
+parametrization for the normal vectors of the two edges from lemma
+3.1, which yields the following group of equations:
+
+    =  f <(e1)  +  f >(e1) - f <(e1)  t,     where t  [0, 1] ,          3.4 Sidepodal Edge and Vertex
+n1                                           where u  [0, 1] ,
+                                             where c < 0 .
+
+  n2 = f <(e2) + f >(e2) - f <(e2)  u ,
+
+n1 = cn2 ,                                                              If a vertex v is located sidepodal to an edge, then lemma 3.2 says
+                                                                        that there must exist a normal n that satisfies the following condi-
+This leads to a matrix equation of form M x = f <(e1), where            tions.
+x = t c cu T and M is represented as column vectors in
+the form                                                                                       n · f <(e) n · f >(e)  0 ,
+
+ M = f <(e1) - f >(e1) f <(e2) f >(e2) - f <(e2) (2)                                         v  Supp(n) .
+
+From here, the valid values for t and u are solved easily by generic    The first inequality holds if and only if one of the factors is non-
+3x3 matrix techniques, and they directly define one of the face nor-    negative, and the other is nonpositive, and the second one holds if
+mal directions for the OBB. This method is presented in algorithm       and only if for each vertex neighbor w  N (v) , n · (w - v)  0.
+2, which tests whether two edges are antipodal, and if so, returns      Therefore the normal vector n satisfies either
+the normal direction for the face of the OBB that is flush with edge
+e1.                                                                            ·  f  <(e)    0  ,
+                                                                            n
+                                                                            
+
+                                                                              n · f >(e)  0 ,           (4)
+
+                                                                            n · (w - v)  0  w  N (v) ,
+
+Algorithm 2: AntipodalDir(e1, e2)                                       or
+
+compute M according to equation (2)                                            ·  f  <(e)    0  ,
+let (t, c, cu)T = M -1f <(e1)                                               n
+if c < 0 and t  [0, 1] and u  [0, 1] then                                   
+
+     let n = f <(e1) + f >(e1) - f <(e1)  t                                   n · f >(e)  0 ,           (5)
+     return n/||n||
+                                                                            n · (w - v)  0  w  N (v) .
+else
+     return null                                                        The existence of a solution can be checked by proceeding with a
+                                                                        Gaussian elimination type of approach, performing elementary row
+3.3 Sidepodal Pair of Edges                                             operations to reduce the inequalities to a pivoted form. However
+                                                                        when doing this, two rows may only be added together when they
+In a similar fashion, it can be analysed whether a pair of edges are    have directions for their inequalities match, so the final pivotized
+sidepodal partners to each other. If two edges e1 and e2 are sidepo-    form of conditions in (4) and (5) will both form a set of 3 to 6
+dal, then the normal vectors defined on the two edges by lemma 3.1      inequalities. If neither of these sets of inequalities form a contra-
+must be perpendicular, which gives the following set of equations:      diction by forcing n to a zero vector, then the vertex v and edge e
+                                                                        are sidepodal.
+    =  f <(e1)  +  f >(e1) - f <(e1)  t,     where t  [0, 1] ,
+n1                                           where u  [0, 1] ,          There is also another way to determine if v  SideV(e). This is
+                                                                        based on the geometric observation that if a vertex is sidepodal to
+                                                                        an edge, then starting from a box configuration that is flush with v
+  n2 = f <(e2) + f >(e2) - f <(e2)  u ,                                 and e on adjacent faces, it is always possible to spin the box around
+                                                                        the normal of the box face that is flush with e until the face of the
+n1 · n2 = 0 .                                                           box that is flush with v meets with a second vertex w  N (v).
+                                                                        This property can be stated in the following form.
+Solving this set of equations leads to a new equation of the form
+                                                                        Proposition 3.3. Given a vertex v and an edge e of a convex poly-
+       a + bt + cu + dtu = 0, where t, u  [0, 1] ,  (3)                 hedron, v  SideV(e) if and only if there exists a vertex w  N (v)
+                                                                        such that (e2 : v  w)  SideE(e).
+where a, b, c and d are all scalar constants. Since the left-hand side
+is a bilinear, closed and continuous expression of the parameters t     Exploiting this property seemed to be more convenient in practice
+and u, it attains its minimum and maximum values at one of the four     rather than solving inequalities (4) and (5), however it is good to
+extreme points of its domain, i.e. one of the four corners of the unit  know that both options exist.
+3.5 Basis from Three Edges                                                        degree polynomial to equation (13), and the values for t and u can
+                                                                                  then be backtracked by using equations (9) and (10). If the second
+Fixing an OBB to be flush with only two edges on adjacent faces of                degree polynomial in equation (13) has no real roots or if the pa-
+the OBB does not yet uniquely define its orientation, but still leaves            rameters t, u or v are not in [0, 1] range, then an orientation does not
+one degree of freedom. This can be seen clearly for example in the                exist. As a special note, it is important to test that the final solution
+earlier analysis by [O'Rourke 1985]. The question then arises, if                 for t, u and v satisfies the original set of equations (6) again, since
+one is given three edges e1, e2 and e3 of a polyhedron, is it possible            equations (8) and (9) imply (11) only one way. That is, a solution
+to orient an OBB to be flush with these edges, so that each of them               to equation (11) might not be a solution to equations (9) and (10).
+lies on separate, but mutually adjacent faces of the OBB, and if                  Similarly, the equations (10) and (11) only imply (13) one way as
+so, what should the orientation (face normals n1, n2 and n3) of the               well.
+OBB be? A hasty analysis might conclude that edges ei would be
+in fact identical to normals ni, and that there would be no solution              In conclusion, this derivation provides an exact test for determin-
+if ei were not mutually perpendicular. This kind of However this                  ing whether given three edges of the convex hull can accommodate
+is not correct. Alternatively, one might think that the normals ni                an OBB orientation where the three edges are all on mutually adja-
+are computable from edges ei by some kind of sequence of cross                    cent faces of the OBB, and if so, provides the possible coordinate
+products, but this is not true either.                                            frames (n1, n2, n3) for the orientation. Algorithm 4 shows a pro-
+                                                                                  grammatic example. Note that this function will return a set of zero
+To provide the correct analysis, one proceeds with setting up a                   to two solutions. The main algorithm will then loop over each of
+group of equations like shown in previous sections. The three edges               these solutions in turn and process each one as a separate candidate
+are all mutually sidepodal, which yields the following:                           configuration.
+
+n1 = f <(e1) + f >(e1) - f <(e1)  t , t  [0, 1] ,                                 Algorithm 4: ComputeBasis(e1, e2, e3)
+                                                                                  compute a - m from equations (7), (12) and (14).
+       =  f <(e2)  +  f >(e2) - f <(e2)  u,   u  [0, 1] ,                         if polynomial kv2 + lv + m has no roots then
+n2
+                                                                                       return {}
+n3 = f <(e3) + f >(e3) - f <(e3)  v , v  [0, 1] , (6)                             let v1, v2 be the roots of kv2 + lv + m
+n1 · n2 = 0 ,                                                                     let O = 
+                                                                                  for v  {v1, v2} do
+
+n2 · n3 = 0 ,                                                                          let t = (g + hv)/(i + jv)
+                                                                                       let u = (c · e + c · f v)/(d · e + d · f v)
+                                                                                       let n1 = a + bt
+                                                                                       let n2 = c + du
+n1 · n3 = 0 .                                                                          let n3 = e + f v
+                                                                                       if t, u, v  [0, 1] and n1  n2 and n1  n3 and n2  n3 then
+Solving this is more complicated than before, but still doable. The
+first three conditions of equation set (6) may be renamed to the form                       O = O  (n1/||n1||, n2/||n2||, n3/||n3||)
+
+                                                                                  return O
+
+          n1 = a + bt , where t  [0, 1] ,                                         3.6 Basis from a Direction and an Edge
+          
+                                                                                  The last subroutine that will be needed is the following. Let n1
+            n2 = c + du , where u  [0, 1] ,                (7)                    be a predetermined normal direction for one of the faces of the
+                                                                                  OBB. Then, given an edge e, is it possible to complete the remain-
+          n3 = e + f v , where v  [0, 1] ,                                        ing orientation of the OBB (compute n2 and n3) such that edge e
+                                                                                  is flush with a face of the resulting OBB? The task is to identify
+for obvious substitutions of vector constants a, b, c, d, e and f . Ex-           if this is possible, and if so, complete n1 to an orthonormal basis
+panding the three dot product conditions of equation set (6) with                 (n1, n2, n3) where, say, n2 is perpendicular to e. Note that like in
+variables from equations (7) then yields                                          the case of the three edges from the previous chapter, the correct
+                                                                                  answer is not the cross product n2 := n1 × e, since if e is parallel
+        a · c + b · ct + u(a · d + b · dt)    = 0,         (8)                    to n1, the cross product will come out zero. Instead, lemma 3.1 can
+                                                                                  be used again, which gives the following two conditions.
+       
+                                                                                     n2 = f <(e) + f >(e) - f <(e)  u , where u  [0, 1] ,
+          c · e + c · f v + u(d · e + d · f v) = 0 ,       (9)                       n1 · n2 = 0 .
+
+        a · e + a · f v + t(b · e + b · f v)  = 0.         (10)                   Combining these two gives
+
+Multiplying equation (8) by (d · e + d · f v) and equation (9) by                             n1 · f <(e) + n1 · f >(e) - f <(e)  u = 0 ,
+-(a · d + b · dt) and adding the resulting equations together gives
+                                                                                  from where the solution is
+                   g + hv + t(i + jv) = 0 ,                (11)
+                                                                                               u = n1 · f <(e) / n1 · (f <(e) - f >(e))
+where     
+                                                                                  when the denominator is not zero, and when it is, any value of u
+          g := (a · c)(d · e) - (a · d)(c · e) ,                                  will satisfy the equation if and only if n1 · f <(e) = 0 as well. The
+          
+
+          h := (a · c)(d · f ) - (a · d)(c · f ) ,         (12)
+
+          i := (b · c)(d · e) - (b · d)(c · e) ,
+
+          
+
+          j := (b · c)(d · f ) - (b · d)(c · f ) ,
+
+and then multiplying equation (10) by -(i + jv) and equation (11)
+by (b · e + b · f v) and adding the resulting equations together yields
+
+                      kv2 + lv + m = 0 ,                   (13)
+
+where
+                     
+
+                     k := h(b · f ) - j(a · f ) ,
+                     
+                     l := h(b · e) + g(b · f )
+
+                                                                            (14)
+                      - i(a · f ) - j(a · e) ,
+                     
+                     m := g(b · e) - i(a · e) .
+
+From here on, the two possible values for the parameter v can be
+readily solved by applying a standard formula for roots of a second
+Algorithm 5: CompleteBasis(n1, e)                                      meaning also that the smaller the set AntiV(e) corresponding to
+let p = n1 · f <(e)                                                    edge e will be in general.
+let q = n1 · f <(e) - f >(e)
+if q = 0 then                                                          Likewise, the sets SideV(e) and SideE(e) have the same property.
+
+     let u = p/q                                                       Theorem 4.2. Given an edge e of C, the sets SideV(e) and
+     let n2 = f <(e) + f >(e) - f <(e)  u                              SideE(e) both form a single connected component in the vertex
+     n2 = n2/||n2||                                                    neighbor graph of C.
+     let n3 = n1 × n2
+     return (n1, n2, n3)                                               Proof. By lemma 3.2, the set of antipodal vertices to edge e is de-
+else if p = 0 then                                                     fined in terms of the support function in the form
+     let n2 = f <(e)
+     let n3 = n1 × n2                                                       SideV(e) = Supp(n) : f <(e) · n f >(e) · n  0 .
+     return (n1, n2, n3)
+else                                                                   The set of normal vectors satisfying this inequality condition for n
+     return                                                            forms a single closed and connected subset of G(C), so therefore
+                                                                       the set of vertices on C whose convex face regions on G(C) this
+remaining face normal n3 is then solvable via a cross product. This    subset corresponds with is also connected. Adding the geometric
+process is shown in algorithm 5.                                       observation from proposition 3.3, it follows that the set SideE(e) is
+                                                                       also connected.
+The equations and algorithms that were presented in this section
+provide the tools for identifying antipodal and sidepodal compan-      The reason that connectedness for these sets is important is that with
+ions for edges, and allows construction of candidate orientations      this property, if one first obtains any element v0 in, say, AntiV(e),
+for an enclosing OBB once a set of candidate edges have been cho-      then the rest of the elements in that set can be enumerated quickly
+sen. The enumeration of these edges will follow a graph search         in O |AntiV(e)| time by performing a graph search starting from
+approach, but in order to make it feasible, these sets must first be   the neighborhood of v0, which will be much faster than having to
+analyzed in some spatial detail. The next section will focus on that   resort to a full O |V | search over all vertices of the convex polyhe-
+task, which will then enable building a search strategy for the algo-  dron. However, this property is only true if the number of neighbors
+rithm overall.                                                         for each vertex of the polyhedron is bounded by a constant. This
+                                                                       condition will be implicitly assumed in all the analysis that follows,
+4 Analysis of Antipodal and Sidepodal Sets                             but one should keep this technicality in mind.
+
+For each convex polyhedron C, one can define the Gaussian              Finally, a similar result exists for the structure of set intersections
+sphere representation of C, denoted by G(C). This representation       of pairs of sidepodal vertex sets.
+is a type of a dual representation of C, formed by a decomposition
+of the unit sphere into disjoint regions, one for each vertex of C.    Theorem 4.3. Given two edges e1 and e2 of C, the set
+A point n in the Gaussian sphere belongs to the region of vertex v     SideV(e1, e2) forms at most two separate connected components
+of C if v  Supp(n). This has the effect that vertices of C are         in the vertex neighbor graph of C.
+mapped to faces of G(C), and faces of C are mapped to single ver-
+tices on G(C). An edge e on C is mapped to an arc on a great           Proof. Expanding on the proof of lemma 3.2, the boundary of
+circle of G(C) that is perpendicular in direction to e. Each face f    SideV(e1) is defined by two equations f <(e1) · n = 0 and
+on G(C) is convex, because if v  Supp(n1) and v  Supp(n2),             f >(e1) · n = 0. These conditions map out two great circles on the
+then v  Supp tn1 + (1 - t)n2 as well for t  [0, 1].                    Gaussian sphere. Since the same holds for SideV(e2), the boundary
+                                                                       of SideV(e1, e2) is defined by an intersection of two pairs of great
+Using the Gaussian sphere representation, the following can be         circles. Given that the intersection of two circles can have two dis-
+said.                                                                  tinct solutions, the boundary of SideV(e1, e2) can be split into two
+                                                                       separate regions, both of which are themselves connected.
+Theorem 4.1. Given an edge e of C, the set AntiV(e) forms a
+single connected component in the vertex neighbor graph of C.          For the set SideV(e1, e2) it is therefore necessary to find, or "boot-
+                                                                       strap" to two separate elements on the opposing sides of the Gaus-
+Proof. The viable normal directions n for an OBB flush with an         sian sphere and perform a graph search from both starting points in
+edge e are explicitly parametrized by lemma 3.1, thus                  order to ensure that the whole set SideV(e1, e2) gets enumerated in
+                                                                       full.
+AntiV(e) = Supp -f <(e)- f >(e)-f <(e) t : t  [0, 1] .
+                                                                       This bootstrapping process is fortunately simple. Each of the sets
+On the Gaussian sphere G(C), this corresponds to a closed and con-     AntiV(e), SideV(e) and SideV(e1, e2) are defined by one or two
+tinuous arc. Since this arc forms a single connected subset of points  support vector directions, so the task of bootstrapping is the same
+on the Gaussian sphere, the set of vertices on C whose convex face     as to find an extreme vertex of the hull. That can be done in linear
+regions on G(C) the arc overlaps with is also connected.               time by iterating over the whole of V , but that is not very interest-
+                                                                       ing. A more advanced method is to utilize a Dobkin-Kirkpatrick
+Thinking about the set AntiV(e) being defined by an arc on the         hierarchy to enable finding supporting vertices in O(log n) time
+Gaussian sphere is also very useful for another reason. The length     [Dobkin and Kirkpatrick 1990]. Therefore the total time complex-
+of the arc is directly defined by the dihedral angle of edge e, and    ity to enumerate these sets is
+the closer the angle is to 180 degrees, the smaller the arc becomes,
+                                                                          · AntiV(e): O log n + |AntiV(e)| .
+
+                                                                          · SideV(e): O log n + |SideV(e)| .
+   · SideV(e1, e2): O log n + |SideV(e1, e2)| .                                                               
+                                                                        · SideV(e) is O(log n) + O( n) = O( n).
+Unfortunately it seems to be too difficult to give strict limits for
+the sizes of antipodal and sidepodal sets in the general case. In       · SideV(e1, e2) is O(log n) + O(1) = O(log n).
+the following sections, the sizes of these sets are analyzed in two
+special cases that are the most interesting.                            Proof. The total time to iterate over these sets is proportional to the
+                                                                        time taken to bootstrap to the first vertex, plus the size of the set
+4.1 Analysis of Sphere(n)                                               itself.
+
+Consider a set of n distinct points taken uniformly random on the       This result concludes the analysis in positive light that in a suitably
+surface of the unit sphere and denote by Sphere(n) the convex hull      uniform scenario, the sizes of antipodal and sidepodal sets are con-
+of that set. Clearly Sphere(n) consists of the n vertices itself. As    siderably smaller and faster to enumerate than linear time. In the
+n grows, the shape of Sphere(n) grows to resemble the unit sphere.      next section, the same analysis is done without the assumption of
+This set has two particularly important properties. The first is that   uniformity in place.
+the dihedral angle of each edge e in Sphere(n) tends towards 180
+degrees. This is another way of saying that the "sharp" edges of        4.2 A Singularity in Cylinder(n)
+Sphere(n) all disappear. The second property is that the number of
+vertices on each face of Sphere(n) is bounded by a constant. In fact,   If the requirement of uniform distribution from the case of
+each face is defined by exactly three vertices with probability 1.      Sphere(n) is lifted, do the properties of theorem 4.7 still hold in
+                                                                        the general case? Unfortunately not always, and it is possible to
+In this scenario, the areas of the convex regions in the Gaussian       construct a scenario where the sizes of these sets are linear. Curi-
+sphere corresponding to each vertex in Sphere(n) tend to zero size.     ously, the only currently found case occurs when the input data set
+Therefore any region R of the Gaussian sphere corresponds to a          is a cylinder, which is defined by
+number of vertices of Sphere(n) that is linearly proportional to
+the surface area of R in Sphere(n). In particular, this means the       Cylinder(n) :=  2i                2i
+following.                                                                              cos , ±1, sin         : i = 1, 2, . . . , n .
+                                                                                        n                 n
+Theorem 4.4. With probability 1, on the set Sphere(n), for each
+edge e, the size of antipodal vertices |AntiV(e)|  O(1).                This set represents a cylindrical shape with n points on both end
+                                                                        caps. An examination of this set shows that each edge e that is part
+Proof. As n grows, the dihedral angle of e tends to 180 degrees. In     of the cylinder end caps of the convex hull of Cylinder(n) has a
+other words, f <(e) tends towards f >(e) and hence the arc traced       linear number of vertices on average in each of the sets AntiV(e),
+by -n = -f <(e) - f >(e) - f <(e)  t degenerates towards a
+single point, which has zero surface area.                              SideV(e) and SideV(e1, e2). Therefore enumerating over these
+                                                                        sets is no faster than just enumerating over all vertices of the hull.
+A similar property exists for sidepodal edges.
+                                                                        Examining the Gaussian sphere of this shape gives a clue to why
+Theorem 4.5. With probability 1, on the set Sphere(n), for each         this happens. One problem stems from the fact that the end faces
+edge e, the size of sidepodal vertices |SideV(e)|  O( n).               of the cylinder lie on parallel planes, and have both n  (n)
+                                                                        vertices. For the Gaussian sphere, this means that there are two
+Proof. Since f <(e) tends towards f >(e), the two boundary circles      vertices corresponding to those faces exactly at the opposite poles
+that define support directions for SideV(e) tend to a single overlap-   of the Gaussian sphere, and they both have n  (n) incident
+ping great circle on the Gaussian sphere. The length of circumfer-      edges connecting them. The existence of such a "singularity"
+ence of this great circle is 2r, whereas the total surface area of the  point that connects a linear number of vertices forces the size of
+sphere is 4r2. Relating areas tovertices, n 4r2, so therefore           AntiV(e) to be linear for each edge on the cylinder end caps. If the
+                                                                        number of vertices on each face of the convex hull was bounded by
+  n 2r, or |SideV(e)|  O( n).                                           a constant, this would not happen. However, even if imposing such
+                                                                        a restriction, the sizes of the sets SideV(e) and SideV(e1, e2) will
+And finally,                                                            still remain linear, so this restriction does not completely capture
+                                                                        the worst case behavior. Therefore, at least in for Cylinder(n), the
+Theorem 4.6. With probability 1, on the set Sphere(n), for              following appears to be the case.
+each pair of edges e1 and e2, the size of sidepodal vertices
+|SideV(e1, e2)|  O(1).                                                  Proposition 4.8. In the worst case,
+                                                                            |AntiV(e)| , |SideV(e)| and |SideV(e1, e2)|  (n) .
+Proof. Continuing from proof of 4.5, the support directions for
+SideV(e1, e2) is the intersection formed by two great circles. When     It remains an open question whether it is possible to characterize
+e1 = e2, the great circles are distinct and the intersection has ex-    the conditions when this occurs in a more precise manner to under-
+actly two solutions that are points. Like in the case of proof of       stand this behavior better. So far this worst case behavior has only
+4.4, points have zero area, and hence SideV(e1, e2)  O(1) as            been observed on shapes that are very cylindrical, and even a small
+well.                                                                   deviation from this generally causes the issue to vanish.
+
+Putting these three results together looks like the following.          5 The New Algorithm
+
+Theorem 4.7. On the set Sphere(n), given an edge e or a pair of         With the help of the mathematical analysis in sections 3 and 4, it is
+edges e1, e2, the total time taken to enumerate                         now possible to present the main algorithm. The overall strategy is
+                                                                        straightforward: instead of performing a brute force search over all
+   · AntiV(e) is O(log n) + O(1) = O(log n).                            potential orientation directions in the sphere, the plan is to enumer-
+                                                                        ate all OBB orientations that are uniquely fixed by combinations of
+Figure 2: Examples of the four different edge contact categories A-D for a convex polyhedron and its enclosing OBB. The features in contact
+with the OBB are highlighted in red. A: Three edges flush with three mutually adjacent faces of the OBB. B: Three edges flush with three
+faces of the OBB, of which two are opposite. C: Three edges flush with two adjacent faces. D: Two edges flush with three faces, of which two
+must be opposite.
+
+Algorithm 6: FindMinOBB(V ,F ,E)                                               and 2  3. The edges 0  1 and 2  3 lie on the opposite
+                                                                               faces of the OBB.
+for e1  E do
+                                                                         C The OBB is flush with three (or more) edges of the hull on only
+for e2  SideE(e1) do                                                           two adjacent faces of the OBB, or in other words, the OBB is
+                                                                               flush with a face and an edge of the hull. Example case with
+/* Test category A                  */                                         minimal contact of the hull and the OBB:
+                                                                                 0 : (0, 0, 0), 2 : (5, 5, 0)
+for e3  SideE(e1, e2) do                                                         1 : (5, 2, 2), 3 : (10, 0, 0)
+     B = ComputeBasis(e1, e2, e3)                                              The minimal volume OBB is flush with the face formed by
+     if B =  then                                                              vertices 0  2  3, and the opposite face of the OBB is in
+                                                                               contact with the vertex 1. Note that the contact edge on an
+              O = ComputeOBB(V, B)                                             adjacent face of the OBB may or may not be the same as one
+                                                                               of the edges of the face. In this case, the adjacent edge is edge
+              RecordOBB(O)                                                     0  3, which is also one of the face edges.
+
+/* Test category B                  */                                   D The OBB is flush with only two edges of the hull on three differ-
+                                                                               ent faces of the OBB. This is a special case where an edge of
+for e3  AntiE(e1) do                                                           the hull coincides with an edge of the OBB. When this occurs,
+                                                                               there must exist two opposite faces on the OBB that contain
+n = AntipodalDir(e1, e3)                                                       edges of the convex hull, or otherwise the box and the poly-
+                                                                               hedron could be projected to a 2D plane along the common
+B = CompleteBasis(n, e2)                                                       shared edge (reducing the shared edge to a point), and the re-
+                                                                               sulting 2D rectangle would not be flush with any edge of the
+if B =  then                                                                   2D polygon and therefore would not be optimal. Example
+                                                                               case with minimal contact of the hull and the OBB:
+              O = ComputeOBB(V, B)                                               0 : (0, 4, 2), 2 : (2, 4, 2), 4 : (1, 4, 0)
+                                                                                 1 : (0, 4, 4), 3 : (3, 0, 1)
+              RecordOBB(O)                                                     In this example, the minimal volume OBB is flush with only
+                                                                               two edges of the polyhedron, but these edges are in contact
+/* Test category C                  */                                         with three different faces of the OBB. The vertex 0 is an in-
+                                                                               ternal vertex that is not in contact with the OBB.
+for f  F do
+                                                                         Figure 2 shows a rendering to illustrate each of the example cases.
+let e1, e2 be two edges in f .
+                                                                         The main search will proceed by testing all valid configurations of
+let n = e1 × e2.                                                         each of these categories. This is done in the following manner:
+for e3  SideE(e1) do
+                                                                      A + B For each edge e1  E, find all edges e2  SideE(e1) that
+B = CompleteBasis(n, e3)                                                       can be placed on an adjacent side of the OBB. Then, for
+                                                                               category A, complete the basis by searching for all edges
+if B =  then                                                                   e3  SideE(e1, e2) to be placed on a third face of the OBB
+                                                                               that is mutually adjacent to both earlier faces. Correspond-
+O = ComputeOBB(V, B)                                                           ingly for category B, complete the basis by searching for all
+                                                                               edges e3  AntiE(e1) to be placed on a third face of the OBB
+RecordOBB(O)                                                                   that is opposite to the face that is in contact with edge e1.
+
+edges of the convex hull. These configurations are divided into four       C Loop over all faces f  F . This fixes one of the face normals
+categories:                                                                    n1 of the OBB. Then loop over all edges e3  SideE(e1),
+                                                                               where e1 is one of the edges of F . Complete the basis for
+A The OBB is flush with three (or more) edges of the hull on three             each using algorithm 5.
+      (or more) mutually adjacent faces of the OBB. Example case
+      with minimal contact of the hull and the OBB:                        D This category gets implicitly handled during the search for
+        0 : (1, 0, 2), 2 : (4, 0, 4), 4 : (3, 2, 0)
+        1 : (1, 4, 3), 3 : (4, 2, 1)
+      The minimal volume OBB is flush with edges 1  2, 1  4
+      and 2  3 on three mutually adjacent faces of the OBB and
+      touches vertex 0 on the face opposite to edge 1  2.
+
+B The OBB is flush with three (or more) edges of the hull on three
+      (or more) faces of the OBB, of which two are opposite to each
+      other. Example case with minimal contact of the hull and the
+      OBB:
+        0 : (0, 2, 0), 2 : (0, 4, 0)
+        1 : (0, 2, 2), 3 : (2, 0, 2)
+      The minimal volume OBB is flush with edges 0  1, 0  2
+      category B by allowing the assumption that e1 = e2, so no                neighbors that are tested for antipodality with respect to edge
+      separate code for testing category D is needed. Effectively              e1 using algorithm 1.
+      this is recognizing that an edge may be sidepodal to itself.
+                                                                           3. For each edge e2 that exists in the subgraph induced by the an-
+The full code to perform this iteration is presented in algorithm              tipodal vertices {vi}i, test each for antipodality with respect
+6. This code contains two new functions that have not been intro-              to edge e1 using algorithm 2. This set of edges generates the
+duced before. The first function ComputeOBB takes a basis for                  final set AntiE(e1).
+the orientation of an OBB and computes six extreme vertices of the
+hull, one for each face of the OBB. With the help of the Dobkin-         For e2  SideE(e1):
+Kirkpatrick structure, this takes at most O(log n) time. The second
+one is the function RecordOBB. This is a constant time opera-              1. Compute the first sidepodal vertex v0  Supp(e1).
+tion which tests the newly created OBB for volume against the best
+previously found one, and records the smaller of the two.                  2. Since the set of sidepodal vertices is connected due to theorem
+                                                                               4.2, find all remaining sidepodal vertices {vi}i  SideV(e1)
+Algorithm 6 contains two separate top level loops. The first ex-               by a flood fill that starts from v0 and proceeds to each of its
+amines categories A, B and D, followed by a second one which                   neighbors that are tested for sidepodality with respect to e1
+examines category C. In the first loop structure, an outer loop over           using methods from section 3.4.
+each edge of the hull fixes the first edge. This is a O(n) operation.
+The second loop iterates over all sidepodal edges of the first edge.       3. For each edge e2 that exists in the subgraph induced by the
+This takes O log n + |SideE(e1)| time.                                         sidepodal vertices {vi}i, test each for sidepodality with re-
+                                                                               spect to edge e1 by using algorithm 3. This set of edges gen-
+The first innermost loop searches through all configurations in cat-           erates the final set SideE(e1).
+egory A in O log n + |SideE(e1, e2)| time. To establish the
+orientation of the OBB, algorithm 4 is invoked, which computes           For e3  SideE(e1, e2):
+a basis set (n1, n2, n3) for the given three edges. The functions
+ComputeOBB and RecordOBB then process the found basis.                     1. Let n = n1 × n2, where n1 and n2 are chosen using lemma
+                                                                               3.1 with respect to edges e1 and e2 in such a way that the cross
+The second innermost loop enumerates all configurations in cate-               product is not denegerate.
+gory B in O log n + |AntiE(e1)| time. If the iterated edges are
+compatible, then one of the OBB face directions is first computed          2. Compute first representatives from both of the two disjoint
+with algorithm 2, which is completed to a full basis by the method             sets of connected components by searching v0  Supp(n)
+5. This basis is then again tested.                                            and v1  Supp(-n).
+
+Last, the second loop body iterates through each configuration in          3. Since the set of sidepodal vertices to a pair of edges is con-
+category C. Each face of the hull directly defines a face direction            nected inside the two disjoint sets, due to theorem 4.3, find all
+for the OBB. The inner loop iterates over the sidepodal edges of e1            remaining sidepodal vertices {vi}i  SideV(e1, e2) by two
+in O log n + |SideE(e1)| time to find the candidate orientations               separate flood fills that start from v0 and v1 respectively, and
+for the second axis of the OBB. Like in the previous case, the full            proceed to each of their neighbors that are tested for sidepo-
+basis is completed and tested.                                                 dality with respect to e1 and e2 using methods from section
+                                                                               3.4.
+The overall number of steps in the first loop structure is |E| log n+
+|SideE(e)| log n + |SideE(e, e)| + |AntiE(e)| log n,                       4. For each edge e3 that exists in the subgraph induced by the
+whereas the second loop runs in |F | log n + |SideE(e)| log n                  sidepodal vertices {vi}i, use algorithm 5 to compute the set
+steps. On the Sphere(n) data set, based on theorem 4.7, the overall            of edges that are sidepodal to both e1 and e2. This set of edges
+algorithm runtime is therefore O n3/2(log n)2 . In the worst case,             generates the final set SideE(e1, e2).
+like in the case of the Cylinder(n) data set suggested by proposition
+4.8, the algorithm runs in O(n3 log n) time.                             This strategy ensures that the sets SideV(·) and SideE(·) are related
+                                                                         to each other in a numerically stable way.
+5.1 Implementing the Graph Search
+                                                                         5.2 Practical Considerations
+The main search algorithm in listing 6 contains for loops over sev-
+eral different sets. Implementing these loops carefully is the key       Whenever implementing any piece of real-world code, there are al-
+to obtaining correct performance. While the for loops e1  E and          ways special considerations that are important to take into account
+f  F are trivial iterations of all stored edges and faces of the         for the implementation to be successful and as efficient as possible.
+hull, the other loops will require a two-phase operation that first      In this section, such practical matters are discussed.
+bootstraps to a first element of the set, and then traverses the vertex
+graph of the hull to compute the remaining ones. This means that         The first one is the fact that the algorithm relies on the precompu-
+the data structure storing the convex polyhedron will need to have       tation of the convex hull for the input point set. It is well known
+vertex adjacency information available. The actual iteration of each     that robustly computing an accurate convex hull for arbitrary input
+set then works out to                                                    can be hard due to floating point imprecision. A good treatise to
+                                                                         the stability issues with convex hull implementation that the reader
+For e2  AntiE(e1):                                                       should be aware of has been presented at GDC [Gregorius 2014].
+
+  1. Compute the first antipodal vertex v0  Supp - f <(e1) .             The OBB computation method itself has been found to be quite sta-
+                                                                         ble. It should however be noted that in places where the algorithms
+  2. Since the set of antipodal vertices is connected due to theorem     presented in this paper compare floating point values for range or
+      4.1, find all remaining antipodal vertices {vi}i  AntiV(e1)        equality, the code should in practice contain a very small epsilon
+      by a flood fill that starts from v0 and proceeds to each of its    threshold for these comparisons. This is because otherwise the
+                                                                         graph search may terminate early when enumerating for example
+                                                                                               20     Sphere(n)
+
+                                                                                                      O n3/2(log n)2
+
+                                                                       seconds to compute OBB  15
+
+                                                                                               10
+
+                                                                                               5
+
+                                                                                               0
+
+Figure 3: Four models from the GAMMA Group real world data                                         0  0.2  0.4        0.6  0.8  1
+set that exhibited worst case performance behavior. In clockwise
+order starting from top left: arrow4.obj, taperoll.obj, candy05.obj                                   n: number of vertices on the sphere ·104
+and kummer.obj. Each object has a strong cylindrical component
+to their convex hulls.                                                 Figure 4: Time taken to compute minimum volume OBB for
+                                                                       Sphere(n).
+the sets SideE(e), and not find an important configuration for the
+OBB.                                                                   AntiV(e) and SideE(e) for each edge e. Since this can be done
+                                                                       outside the hot inner loops in O(n log n) time and O(n) storage
+To improve overall performance, a developer is advised to pay at-      space, it will speed up the implementation noticeably. In fact, pre-
+tention to the symmetry of the problem to avoid redundant (but con-    computing full contents of the antipodal and sidepodal sets outside
+stant factor) work. One such case occurs for example when enumer-      the hot loops was measured to be a performance gain. That how-
+ating over all edge pairs ei and ej that are sidepodal to each other.  ever is an implementation tradeoff since storing full sets will require
+Since the order in which these are searched does not matter, one can   more than a linear amount of memory storage.
+cut the work in half by assuming a canonical ordering that i  j.
+Note that depending on the context, equality can be important, or      For the graph searches, the implementation will probably follow a
+otherwise category D from section 5 might be missed. Another such      flood fill type of approach to detect whether a given vertex has been
+place where symmetry may occur is if traversing over vertex pairs      visited before. An efficient implementation of this should not use
+to find edges on the graph. In that case, the edges vi  vj and         a set or an associative container that would dynamically mutate to
+vj  vi are the same, and should not be considered twice.               track the visited vertices, but instead it is much faster to preallocate
+                                                                       a flat array of static size n, where each index of the array stores
+The version of the algorithm that was implemented for the              the information whether that vertex has been visited or not. This
+benchmarks in the next section does not actually use a Dobkin-         scheme gives the ability to clear the structure for new searches in
+Kirkpatrick hierarchy to locate extreme vertices. To explain           constant time, by giving each search operation its own unique ID,
+why, consider the problem of finding k supporting vertices             and storing at each index this ID if the given vertex has been visited.
+ Supp(n1), Supp(n2), . . . , Supp(nk) corresponding to a se-           Starting a new search then corresponds to simply incrementing the
+quence of k direction vectors (n1, n2, . . . , nk). In the implemen-   ID counter by one, which effectively resets all vertices to unvisited
+tation, one is able to organize these queries so that each search      state. Also, when performing the actual search, one should not use
+direction is often only a very small perturbation away from the        recursive function calls, because unless optimized into tail calls,
+previous search direction. Then the first query for Supp(n1) will      these may have unbounded depth and stack space in most runtime
+amount to an uninformed search over V , but when searching for         environments is fixed.
+Supp(n2), it is expected to be found in close vicinity to Supp(n1)
+and can be located in only a few steps by performing a greedy hill     5.3 Dealing with the Singularity
+climbing search starting from the previously found vertex. There-
+fore Supp(n2) through Supp(nk) can be found very quickly if            Since the performance gap between best and worst cases is so large,
+one caches the previous answer and always begins the next search       it is natural to ask if the worst case performance can be improved.
+from that cached vertex. In this kind of implementation, there exists  Unfortunately this is yet unknown, but there are a number of things
+a subroutine of depth-first search code which quickly establishes a    that can be done to mitigate the issue in practice. In this section
+good spatially coherent ordering for the edge graph, and all loops in  three such strategies are presented.
+the algorithm are implemented to follow this spatial order. In prac-
+tice this was seen to perform extremely well, to the point of almost   The algorithms presented in section 3 deal with computing scalars
+having the confidence to assume amortized O(1) time extreme ver-       to obtain normal vectors for OBB faces from the parametrization
+tex queries. However, there are technicalities involved and practical  given in lemma 3.1. In the difficult case of the cylinder, it can be
+benchmarks still showed a very slow logarithmic growth. A rigor-       observed that the solutions for this parametrization often come out
+ous exploitation of spatial coherency might have to consider a fast    at the extreme ends when t = 0 or t = 1, since several edges of the
+constant factor approximation to what is called the Chinese Post-      cylinder have a dihedral angle of exactly 90 degrees. This corre-
+man Problem [Filho and de Avila Ribeiro Junqueira 2010] in order       sponds to the special case when one of the OBB faces is flush with
+to establish a strict upper bound.                                     a face of the polyhedron, and because these configurations will all
+                                                                       be searched in the loop for category C, there is no reason to handle
+When benchmarking the implementation, it was found to be prac-         them at all in categories A and B. Therefore the implementation is
+tical to precompute up front the first representatives for the sets
+file          vertices  faces  edges  texact tmerge                     textrude  tapprox  Vextrude /Vexact  Vapprox /Vexact
+arrow4.obj     1024     2044   3066   84.7 29.6                          16.4     0.54       1.0005x            1.006x
+taperoll.obj    839     1674   2511   67.5 54.3                          8.63     2.05        1.005x            1.011x
+candy05.obj   20044     40084  60126  84.7 83.9                          29.8      0.1       1.00007x           1.001x
+kummer.obj      624     1244   1866   66.9 11.8                          3.45      0.7        1.007x            1.012x
+
+Figure 5: Results of applying preprocessing methods on the four worst case models from the data set obtained from GAMMA Group mesh
+database. The columns tx show the number of seconds taken to compute the minimum volume OBB in different cases. The column texact
+corresponds to the case of the original unprocessed model. Last two columns denote ratios of the found OBBs to the volume of the optimal
+box, when approximation methods were used.
+
+free to restrict valid values of t to the range [, 1 - ] for a small    merge or extrude steps before this strategy was not seen beneficial,
+constant  > 0 in order to cut down redundant work.                      so the results for this strategy consist of only running the approx
+                                                                        step alone.
+Another observation is that the convex hull algorithm that is em-
+ployed might by convention generate hulls that consist of triangular    The next section reports results from practical tests, where the last
+faces only. This can create neighboring triangles that are aligned      conducted test shows comparisons of adding the three optimizations
+in a plane. The edges joining such adjacent planar triangles have       merge, extrude and approx that were introduced in this section.
+a dihedral angle of 180 degrees each, so they are degenerate and
+do not have any actual effect and an implementation should remove       6 Experimental Results
+these edges in a preprocess step. This can be done either by merg-
+ing all neighboring planar triangles to form convex polygons, or        The new algorithm proposed in section 5 was implemented us-
+by ignoring all internal edges on the faces during the search. This     ing the open source MathGeoLib software package [Jyla¨nki 2011­
+scheme will be later called the merge strategy. In the case of the      2015]. The code was then tested on two different data sets. The first
+cylinder, the overhead from redundant internal edges can be consid-     one was the synthetic case of Sphere(n) from section 4.1 for values
+erable since there are a linear number of them, and if not removed,     n  {50, 100, 150, . . . , 10000}. The second data set consisted of
+each of these internal edges will in turn have a linear number of       2088 different 3D models obtained from the GAMMA Group on-
+sidepodal partners.                                                     line 3D mesh research database [GAMMA Group 2008]. From this
+                                                                        database, all files in the .obj file format were chosen from five dif-
+The abovementioned optimizations are unfortunately only improve-        ferent categories:
+ments by a constant factor. In order to completely remove the
+problem in practice, two specific approximation methods were em-           · 55 models from the dataset 2001.
+ployed with the goal of preprocessing the convex hull in a subtle
+manner that should have only minimal effect on the resulting OBB,          · 381 models from the dataset ANIMALS.
+but would considerably cut down the work in practice. Assuming
+that the basis of the OBB obtained as a result from this approxima-        · 530 models from the dataset ARCHITEC.
+tion does not change much, then the same basis can be used on the
+original unprocessed convex hull to compute the exact tight-fitting        · 437 models from the dataset GEOMETRY.
+OBB.
+                                                                           · 685 models from the dataset MECHANICAL.
+The first method builds on the idea that because the end caps of the
+cylinder are so problematic due to the large number of vertices in      In the first test, an OBB was generated for each input object in
+them, these faces should be removed. This can be done by extrud-        both of the two data sets using the exact version of new algorithm
+ing a new vertex outward to the direction of the face normal from       that does not include approximations from the previous section, and
+the centroid of each face polygon that has too many vertices. This      the result was compared for optimality against the smallest vol-
+breaks each polygonal face up into a number of triangles, which         ume OBB found via a brute force search. The brute force search
+each have their unique face normal direction. If the new vertex is      consisted of subdividing the unit hemisphere to a search grid of
+located very close to the plane of the polygon, the orientation of      256  256 starting search directions, and using the rotating calipers
+the resulting OBB will be very close to the original. This method       method to improve the volume of the box until reaching a local
+will be called the extrude strategy. For convex hull algorithms that    minimum for each start orientation. This test confirmed that in each
+produce only triangular data, this strategy will first require running  case, the new algorithm found the same or a better bounding OBB
+the merge step to find the faces with large number of vertices.         than the brute force method did, up to the precision determinable
+                                                                        by floating point computation.
+The second method operates by constructing a simplified approxi-
+mation of the convex hull by repeatedly merging two adjacent faces      The second test consisted of benchmarking the performance of the
+of the hull that are almost coplanar, until an error threshold is met   exact version of the new algorithm on the same two data sets.
+or the number of faces is reduced down to a number that is small        The performance tests were run on a MacBook Pro laptop with a
+enough to process. When two faces are merged in this manner, the        2.7GHz Intel Core i7 processor and 16GB of RAM running Win-
+new face does not even need to enclose all the points of the original   dows 8.1. The test program was built by using the Microsoft Visual
+hull, since the approximation will only be used to establish an orien-  Studio 2013 Update 4 compiler, with 64-bit compilation and Math-
+tation for the OBB and the tight fit can be computed on the original    GeoLib AVX SIMD performance optimizations enabled. Execu-
+hull after the basis has been chosen. The process can be done for       tion was single-threaded in all benchmarks. The numbers reported
+disjoint pairs of faces, after which the convex hull is recomputed      in each case do not include the time taken to run the quickhull algo-
+again to ensure proper convexity. For the case of the cylinder, this    rithm. The resulting runtime performance for the case of Sphere(n)
+method was found to be very efficient, since it successfully removes    is shown in figure 4, where the actual data is graphed in blue. A
+large numbers of edges on the side of the cylinder, where the finest    regression curve of the expected performance of n3/2(log n)2 pro-
+detail typically is. This will be called the approx strategy. Running   vided by earlier analysis was fit to this data in the range n  5000
+                                                                        and is shown for reference in black. Extrapolating this curve for
+         6
+
+                                                                        2001
+
+         5                                                              animals
+
+                                                                        architec
+
+                                                                        geometry
+
+         4                                                              mechanical
+
+                                                                        O n3/2(log n)2
+
+seconds  3
+
+         2
+
+         1
+
+         0
+
+            0  500  1,000  1,500  2,000                                    2,500        3,000  3,500  4,000  4,500
+
+                                                                        n
+
+Figure 6: A scatter plot showing the time taken to compute the minimum volume OBB for five different data sets from the GAMMA Group 3D
+mesh database. Each model is located on the x-axis based on the number of vertices on its convex hull. The y-coordinate specifies the number
+of seconds taken to compute the OBB for that model. The black curve shows the regression function from the previous Sphere(n) case. The
+four models shown in figure 3 were complete outliers that did not fit in this plot.
+
+values of 5000  n  10000 shows a pleasing match with the                method operates by quickly iterating over all possible OBB
+recorded data.                                                          orientations that are uniquely determined by combinations of
+                                                                        edges of the convex hull of the input. This was made possible
+Figure 6 shows the performance of the exact version of the algo-        with the help of new mathematical insight on the problem. The
+rithm on the real world data sets from the GAMMA Group. In              algorithm is able to accurately find the optimal minimum volume
+the scatter plot, the x-coordinate of each point gives the number of    enclosing OBB in all conducted tests. Unfortunately the optimality
+points on the convex hull of that object, whereas the vertical axis     of this method depends on an unproven assumption, but given the
+shows the time taken to compute the OBB, in seconds. The re-            infallible practical evidence, it is appropriate to posit the following.
+sults from this benchmark show that fortunately the performance
+for most real world objects is very similar to the case of Sphere(n).   Conjecture 7.1. A box of minimal volume circumscribing a convex
+Of the 2088 models that were tested, 2084 exhibited performance         polyhedron has at least three distinct edge-face contacts (of which
+close to the best case behavior. The remaining four models were         at least two occur on adjacent faces of the OBB).
+outliers that took more than a minute to process. Taking a closer
+look revealed that each of these four had convex hulls that have a      In this statement, an edge-face contact means that a specific face f
+strong cylindrical shape. Figure 3 shows a rendering of each.           of the OBB is flush with a specific edge e of the polyhedron. Being
+                                                                        distinct means that in any pair of the contacts, either the edges or
+The last test consisted of measuring the effects of including the       the faces in question are different. This statement captures all of the
+merge, extrude and approx mitigation strategies on these four dif-      categories A - D enumerated in section 5 (figure 2), so if proven,
+ficult test models from the GAMMA Group database that suffered          it would assert the optimality of the new algorithm. The second
+from degenerate behavior. The results are presented in figure 5 and     part in parentheses is repeated from theorem 2.1. If conjecture 7.1
+they look promising. For all models, merging planar triangles was       holds, the presented method will be the first algorithm in its own
+an improvement. Since it does not change the optimality of the          class in comparison to all previously published results: an exact
+result or slow down the computation of the OBB, it would be a           and deterministic geometric enumeration method for solving the
+mistake to ignore the merge preprocessing step. The extrude ap-         minimum volume OBB problem.
+proximation method was also effective and it was able to speed up
+the computation considerably in each case. Even while this method       The algorithm has been implemented in practice and the real world
+is not theoretically optimal, it is something to consider in practice,  results validate the theoretical aspects. On the tested real world
+since the resulting OBB volumes were only 0.5% larger than the          models that are not cylinder-like, the algorithm runs in the pre-
+optimal in worst case. Finally, the results of the approx method        dicted O(n3/2(log n)2) time, which is a large improvement over
+shows that it is a promising way to speed up the search to a few        the previously published best O(n3) time complexity. For mod-
+seconds at most, while only introducing about one percent increase      els that have only a few hundred points on their convex hulls, the
+in the resulting volume.                                                algorithm can find optimal OBBs at interactive rates. In the worst
+                                                                        case, which is currently only known to happen on cylindrical shapes
+7 Conclusion and Future Work                                            and shapes that can have vertices with (n) number of neighbors,
+                                                                        the algorithm exhibits degenerate behavior that causes it to run in
+A new algorithm has been introduced for finding tight-fitting           O(n3 log n) time. However this performance cliff can be mitigated
+enclosing bounding boxes for three-dimensional point data. The          in practice by performing a preprocessing step on the input. It is an
+open question if this worst case behavior can be strictly improved.     ERICSON, C. 2004. Real-Time Collision Detection (The Morgan
+On the other end, I believe that (n3/2) is a lower bound that can-         Kaufmann Series in Interactive 3-D Technology) (The Morgan
+not be circumvented by any algorithm that is based on enumerating          Kaufmann Series in Interactive 3D Technology). Morgan Kauf-
+edge configurations of the hull.                                           mann Publishers Inc., San Francisco, CA, USA.
+
+In some applications it is more useful to find an enclosing OBB that    FILHO, M. G., AND DE AVILA RIBEIRO JUNQUEIRA, R. 2010.
+minimizes the surface area of the box rather than the volume. The          Chinese postman problem (cpp): solution methods and compu-
+presented algorithm can be trivially adapted to optimize the sur-          tational time. Int. J. of Logistics Systems and Management.
+face area instead of the volume, but it is unclear however whether
+this will result in optimal minimum surface area OBBs. Due to the       FREEMAN, H., AND SHAPIRA, R. 1975. Determining the
+already lengthy treatise presented in this paper, this kind of exami-      minimum-area encasing rectangle for an arbitrary closed curve.
+nation was left out for later.                                             Commun. ACM 18, 7 (July), 409­413.
+
+Solving conjecture 7.1 will probably need to examine the volume of      GAMEDEV.NET. How to create oriented bounding box.
+an OBB as a function of a given basis. O'Rourke suspected that this
+function might have local minima in configurations where the OBB        GAMMA GROUP, 2008. 3d meshes research database of
+is flush with exactly two edges and four vertices of the polyhedron,       the group ge´ne´ration automatique de maillages et me´thodes
+but noted that he had not found evidence of this in practice. If such      d'adaptation, inria, france. [software, website]. Avail-
+a configuration exists that is a global minimum, it will disprove the      able at https://www-roc.inria.fr/gamma/gamma/
+optimality of the new algorithm presented here. Despite attempts           download/download.php.
+at producing such a configuration via computer search, I have not
+been able to find a counterexample. In fact, such a configuration       GEOMETRIC TOOLS LLC. Mathematics: Computational geome-
+does not seem to exist even as a local minimum. Therefore it raises        try.
+a question whether conjecture 7.1 could even be strengthened to
+apply to all local minima of the volume function.                       GOTTSCHALK, S., LIN, M. C., AND MANOCHA, D. 1996.
+                                                                           Obbtree: A hierarchical structure for rapid interference detec-
+Acknowledgements                                                           tion. In Proceedings of the 23rd Annual Conference on Com-
+                                                                           puter Graphics and Interactive Techniques, ACM, New York,
+I would like to thank Kalle Leppa¨la¨ and Ilari Vallivaara for each of     NY, USA, SIGGRAPH '96, 171­180.
+the many pleasing and insightful conversations on the topic.
+                                                                        GREGORIUS, D., 2014.  The 3d quickhull algo-
+References
+                                                                        rithm.  Game Developers Conference. Available at
+BARBER, C. B., DOBKIN, D. P., AND HUHDANPAA, H. 1996.
+   The quickhull algorithm for convex hulls. ACM TRANSAC-               http://www.gdcvault.com/play/1020141/
+   TIONS ON MATHEMATICAL SOFTWARE 22, 4, 469­483.
+                                                                        Physics-for-Game-Programmers.
+BAREQUET, G., AND HAR-PELED, S. 2001. Efficiently approxi-
+   mating the minimum-volume bounding box of a point set in three       JYLA¨ NKI, J., 2011­2015. MathGeoLib: A C++ library for
+   dimensions. J. Algorithms 38, 1 (Jan.), 91­109.                         3D mathematics and geometry manipulation. Available at
+                                                                           http://clb.demon.fi/MathGeoLib/ and https://
+BARTZ, D., KLOSOWSKI, J. T., STANEKER, D., INTERAKTIVE                     github.com/juj/MathGeoLib/.
+   SYSTEME, G., AND TU¨ BINGEN, U., 2005. Visual computing
+   for medicine.                                                        KAY, T. L., AND KAJIYA, J. T. 1986. Ray tracing complex
+                                                                           scenes. In Proceedings of the 13th Annual Conference on Com-
+BORCKMANS, P. B., AND ABSIL, P.-A. 2010. Oriented bounding                 puter Graphics and Interactive Techniques, ACM, New York,
+   box computation using particle swarm optimization. In ESANN.            NY, USA, SIGGRAPH '86, 269­278.
+
+CHAN, C. 2003. Minimum Bounding Boxes and Volume Decom-                 LARSSON, T., AND KA¨ LLBERG, L. 2011. Fast computation of
+   position of CAD Models. University of Hong Kong.                        tight-fitting oriented bounding boxes. In Game Engine Gems 2,
+                                                                           E. Lengyel, Ed. A K Peters, 3­19.
+CHANG, C.-T., GORISSEN, B., AND MELCHIOR, S. 2011.
+   Fast oriented bounding box optimization on the rotation group        MEGIDDO, N. 1982. Linear-time algorithms for linear program-
+   SO(3,R). ACM Trans. Graph. 30, 5 (Oct.), 122:1­122:16.                  ming in r3 and related problems. In Foundations of Computer
+                                                                           Science, 1982. SFCS '08. 23rd Annual Symposium on, 329­338.
+DIMITROV, D., KNAUER, C., KRIEGEL, K., AND ROTE, G. 2009.
+   Bounds on the quality of the pca bounding boxes. Comput.             O'ROURKE, J. 1985. Finding minimal enclosing boxes. Interna-
+   Geom. Theory Appl. 42, 8 (Oct.), 772­789.                               tional Journal of Computer & Information Sciences 14, 3, 183­
+                                                                           199.
+DOBKIN, D. P., AND KIRKPATRICK, D. G. 1990. Determining
+   the separation of preprocessed polyhedra: A unified approach.        SCHNEIDER, P. J., AND EBERLY, D. 2002. Geometric Tools for
+   In Proceedings of the Seventeenth International Colloquium on           Computer Graphics. Elsevier Science Inc., New York, NY, USA.
+   Automata, Languages and Programming, Springer-Verlag New
+   York, Inc., New York, NY, USA, 400­413.                              STACKOVERFLOW. Creating oobb from points.
+
+EBERLY, D. H. 2006. 3D Game Engine Design, Second Edition: A            TOUSSAINT, G. 1983. Solving geometric problems with the rotat-
+   Practical Approach to Real-Time Computer Graphics (The Mor-             ing calipers. In Proc. IEEE MELECON '83, 10--02.
+   gan Kaufmann Series in Interactive 3D Technology). Morgan
+   Kaufmann Publishers Inc., San Francisco, CA, USA.                    TROUTMAN, N. Calculating minimum volume bounding box.
+
+                                                                        WELZL, E. 1991. Smallest enclosing disks (balls and ellipsoids). In
+                                                                           Results and New Trends in Computer Science, Springer-Verlag,
+                                                                           359­370.
+
