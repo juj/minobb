@@ -57,7 +57,7 @@ int main()
 		vec3 p(v[3*i], v[3*i+1], v[3*i+2]);
 		vec3 lp = o.LocalToWorldInverse(p);
 		for (int a = 0; a < 3; ++a)
-			worst = Maxf(worst, fabsf(lp[a]) - o.r[a]);
+			worst = fmaxf(worst, fabsf(lp[a]) - o.r[a]);
 	}
 	printf("worst containment violation = %.3e %s\n", worst, worst > 1e-4f ? "  <-- FAILS TO CONTAIN" : "");
 

@@ -72,9 +72,8 @@ namespace
 // Small math helpers
 // ----------------------------------------------------------------------------
 
-inline float Minf(float a, float b) { return a < b ? a : b; }
-inline float Maxf(float a, float b) { return a > b ? a : b; }
-inline float Max3f(float a, float b, float c) { return Maxf(Maxf(a, b), c); }
+// Maximum of the three components (horizontal max).
+inline float hmax(const vec3 &v) { return fmaxf(v.x, fmaxf(v.y, v.z)); }
 // Same semantics as MathGeoLib's EqualAbs(): |a - b| < epsilon (default 1e-4).
 inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
 
@@ -266,7 +265,7 @@ float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, floa
 		float cosA2 = -ed.Dot(d[2]);
 		float cosA3 = -ed.PerpDot(d[3]);
 
-		float maxCos = Maxf(Maxf(cosA0, cosA1), Maxf(cosA2, cosA3));
+		float maxCos = fmaxf(fmaxf(cosA0, cosA1), fmaxf(cosA2, cosA3));
 		if (cosA0 >= maxCos)      { ed = d[0];                e[0] = NEXT_P(e[0]); d[0] = (NEXT_P(e[0]) - *e[0]).Normalized(); }
 		else if (cosA1 >= maxCos) { ed = d[1].Rotated90CW();  e[1] = NEXT_P(e[1]); d[1] = (NEXT_P(e[1]) - *e[1]).Normalized(); }
 		else if (cosA2 >= maxCos) { ed = -d[2];               e[2] = NEXT_P(e[2]); d[2] = (NEXT_P(e[2]) - *e[2]).Normalized(); }
@@ -282,10 +281,10 @@ float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, floa
 		{
 			vDir = ed;
 			minArea = area;
-			minU = Minf(minu, maxu);
-			maxU = Maxf(minu, maxu);
-			minV = Minf(minv, maxv);
-			maxV = Maxf(minv, maxv);
+			minU = fminf(minu, maxu);
+			maxU = fmaxf(minu, maxu);
+			minV = fminf(minv, maxv);
+			maxV = fmaxf(minv, maxv);
 		}
 	}
 
@@ -331,7 +330,7 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 
 	float scale = 1.f;
 	for (int i = 0; i < n; ++i)
-		scale = Maxf(scale, Max3f(fabsf(pts[i].x), fabsf(pts[i].y), fabsf(pts[i].z)));
+		scale = fmaxf(scale, hmax(vec3(fabsf(pts[i].x), fabsf(pts[i].y), fabsf(pts[i].z))));
 
 	// Find four affinely independent points to bootstrap with.
 	int ia = -1, ib = -1, ic = -1, id = -1;
@@ -357,7 +356,7 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	{
 		// The points are planar (or fewer than 4 unique points): signal degenerate so that
 		// the caller falls back to the 2D algorithm.
-		hull.v.resize(Minf((int)pts.size(), 3));
+		hull.v.resize(fminf((int)pts.size(), 3));
 		for (int i = 0; i < (int)hull.v.size(); ++i)
 			hull.v[i] = pts[i];
 		return hull;
@@ -950,8 +949,8 @@ bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a,
 	float ab = a + b;
 	float ac = a + c;
 	float abcd = ab + c + d;
-	float minVal = Minf(Minf(a, ab), Minf(ac, abcd));
-	float maxVal = Maxf(Maxf(a, ab), Maxf(ac, abcd));
+	float minVal = fminf(fminf(a, ab), fminf(ac, abcd));
+	float maxVal = fmaxf(fmaxf(a, ab), fmaxf(ac, abcd));
 	return minVal <= 0.f && maxVal >= 0.f;
 }
 
@@ -1034,9 +1033,9 @@ bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const std::vect
 		float n = dot(f1b, e);
 		const float epsilon = 1e-4f;
 		if (s > epsilon)
-			tMax = Minf(tMax, n / s);
+			tMax = fminf(tMax, n / s);
 		else if (s < -epsilon)
-			tMin = Maxf(tMin, n / s);
+			tMin = fmaxf(tMin, n / s);
 		else if (n < -epsilon)
 			return false;
 
@@ -1064,11 +1063,11 @@ void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 		if (candidates.empty())
 		{
 			for (const vec3 &p : hullV)
-				m = Minf(m, dot(dir, p));
+				m = fminf(m, dot(dir, p));
 		}
 		else
 			for (size_t l = 0; l < candidates.size(); ++l)
-				m = Minf(m, dot(dir, hullV[candidates[l]]));
+				m = fminf(m, dot(dir, hullV[candidates[l]]));
 		return m;
 	};
 	float minN1 = minAlong(n1, antipodalPointsForEdge[edgeI]);
@@ -1394,12 +1393,12 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 					if (antipodalsEdge3.empty())
 					{
 						for (int a = 0; a < V; ++a)
-							minN3 = Minf(minN3, dot(n3, vtx[a]));
+							minN3 = fminf(minN3, dot(n3, vtx[a]));
 					}
 					else
 					{
 						for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-							minN3 = Minf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
+							minN3 = fminf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
 					}
 
 					float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
@@ -1450,12 +1449,12 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		if (antipodals.empty())
 		{
 			for (int j = 0; j < V; ++j)
-				minN1 = Minf(minN1, dot(n1, vtx[j]));
+				minN1 = fminf(minN1, dot(n1, vtx[j]));
 		}
 		else
 		{
 			for (size_t j = 0; j < antipodals.size(); ++j)
-				minN1 = Minf(minN1, dot(n1, vtx[antipodals[j]]));
+				minN1 = fminf(minN1, dot(n1, vtx[antipodals[j]]));
 		}
 
 		for (size_t j = 0; j < compatibleEdgesI.size(); ++j)
@@ -1493,12 +1492,12 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				if (antipodalsEdge3.empty())
 				{
 					for (int a = 0; a < V; ++a)
-						minN3 = Minf(minN3, dot(n3, vtx[a]));
+						minN3 = fminf(minN3, dot(n3, vtx[a]));
 				}
 				else
 				{
 					for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-						minN3 = Minf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
+						minN3 = fminf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
 				}
 
 				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
