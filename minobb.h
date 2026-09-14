@@ -27,6 +27,8 @@
 
 #pragma once
 
+#include <vector>
+
 // A minimal 3-component float vector.
 struct vec3
 {
@@ -84,3 +86,25 @@ struct OBB
 //
 // Returns a degenerate OBB (IsDegenerate() == true) if num_pts < 1.
 OBB minobb(float *pts, int num_pts, int stride_bytes);
+
+// A triangle mesh representing a convex hull: vertices `v` and triangular
+// faces `f` (indices into `v`), CCW oriented from outside.
+struct Hull3
+{
+	std::vector<vec3> v;  // Hull vertices.
+	std::vector<std::vector<int>> f; // Hull faces (triangles), CCW oriented from outside.
+
+	bool IsDegenerate() const { return v.size() <= 3 || f.empty(); }
+};
+
+// Computes the convex hull of the point set.
+//
+// `pts` points to an array of `num_pts` xyz point triples in floats.
+// `stride_bytes` is the byte stride between consecutive points (e.g. 12 for
+// tightly packed floats, or larger if the points are embedded in a struct).
+// Exact duplicate points are discarded. Interior points are not part of the
+// hull output.
+//
+// The hull is degenerate (IsDegenerate() == true) if the points are planar,
+// collinear, or there are fewer than 4 distinct points.
+Hull3 convex_hull(float *pts, int num_pts, int stride_bytes);

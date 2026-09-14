@@ -65,22 +65,19 @@ float OBB::Distance(const vec3 &p) const
 		? (float)std::sqrt((double)dx*dx + (double)dy*dy + (double)dz*dz) : 0.f;
 }
 
-namespace
-{
-
 // ----------------------------------------------------------------------------
 // Small math helpers
 // ----------------------------------------------------------------------------
 
 // Maximum of the three components (horizontal max).
-inline float hmax(const vec3 &v) { return fmaxf(v.x, fmaxf(v.y, v.z)); }
+static inline float hmax(const vec3 &v) { return fmaxf(v.x, fmaxf(v.y, v.z)); }
 // Same semantics as MathGeoLib's EqualAbs(): |a - b| < epsilon (default 1e-4).
-inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
+static inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
 
-float LengthSq(const vec3 &v) { return dot(v, v); }
+static float LengthSq(const vec3 &v) { return dot(v, v); }
 
 // Normalizes the vector in place, returns the original length.
-float Normalize(vec3 &v)
+static float Normalize(vec3 &v)
 {
 	float lenSq = LengthSq(v);
 	if (lenSq > 0.f)
@@ -92,7 +89,7 @@ float Normalize(vec3 &v)
 	return (float)sqrt((double)lenSq);
 }
 
-vec3 Normalized(const vec3 &v)
+static vec3 Normalized(const vec3 &v)
 {
 	vec3 u = v;
 	Normalize(u);
@@ -100,7 +97,7 @@ vec3 Normalized(const vec3 &v)
 }
 
 // A vector perpendicular to this one (this one must not be near-zero).
-vec3 Perpendicular(const vec3 &v)
+static vec3 Perpendicular(const vec3 &v)
 {
 	// Choose the smallest magnitude component and cross with the corresponding unit axis.
 	const float ax = fabsf(v.x), ay = fabsf(v.y), az = fabsf(v.z);
@@ -112,7 +109,7 @@ vec3 Perpendicular(const vec3 &v)
 // Computes an orthonormal basis (outU, outV) perpendicular to this vector
 // (this vector must be normalized). Same semantics as MathGeoLib's
 // vec::PerpendicularBasis().
-void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
+static void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
 {
 	outU = Normalized(Perpendicular(v));
 	outV = Normalized(cross(outU, v));
@@ -136,12 +133,12 @@ struct float2
 	float2 Rotated90CW() const { return float2(y, -x); }
 };
 
-inline float2 operator - (const float2 *a, const float2 &b) { return *a - b; }
+static inline float2 operator - (const float2 *a, const float2 &b) { return *a - b; }
 
 // Computes the convex hull of the points in place (returns it in the first
 // n' elements, CCW oriented, no collinear or duplicate points).
 // Port of MathGeoLib's float2_ConvexHullInPlace().
-int ConvexHull2InPlace(float2 *p, int n)
+static int ConvexHull2InPlace(float2 *p, int n)
 {
 	if (n <= 1) return n > 0 ? n : 0;
 
@@ -214,7 +211,7 @@ int ConvexHull2InPlace(float2 *p, int n)
 // Port of MathGeoLib's float2::MinAreaRectInPlace() (rotating calipers).
 // On output: uDir, vDir are the rectangle axes, [minU,maxU]x[minV,maxV] the
 // extents in that frame, center the rectangle center. Returns the area.
-float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, float2 &vDir,
+static float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, float2 &vDir,
 	float &minU, float &maxU, float &minV, float &maxV)
 {
 	if (n <= 0)
@@ -300,15 +297,7 @@ float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, floa
 // 3D convex hull (simple incremental algorithm, O(n^2) typical)
 // ----------------------------------------------------------------------------
 
-struct Hull3
-{
-	std::vector<vec3> v;  // Hull vertices.
-	std::vector<std::vector<int>> f; // Hull faces (triangles), CCW oriented from outside.
-
-	bool IsDegenerate() const { return v.size() <= 3 || f.empty(); }
-};
-
-Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
+static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
 	Hull3 hull;
 
@@ -491,7 +480,7 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	return hull;
 }
 
-Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
+static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 {
 	// Note: MathGeoLib's Polyhedron::ConvexHull is an incremental algorithm whose
 	// exact vertex set for nearly-degenerate inputs is path-dependent (initial
@@ -500,6 +489,35 @@ Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 	// well-conditioned point sets (the intended use case) the two agree, and the
 	// OBB search below is robust to the extra nearly-coplanar vertices.
 	return BuildHull3Core(ptsIn);
+}
+
+Hull3 convex_hull(float *pts, int num_pts, int stride_bytes)
+{
+	if (!pts || num_pts <= 0 || stride_bytes < 12)
+		return Hull3(); // Degenerate (no vertices, no faces).
+
+	// Copy the (possibly strided) input into a contiguous array, removing
+	// exact duplicates (BuildHull3Core does the same, but keep the contract
+	// explicit at the API boundary).
+	std::vector<vec3> points;
+	points.reserve((size_t)num_pts);
+	for (int i = 0; i < num_pts; ++i)
+	{
+		const float *p = (const float *)pts + (size_t)i * (stride_bytes / 4);
+		points.push_back(vec3(p[0], p[1], p[2]));
+	}
+	std::sort(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
+	{
+		if (a.x != b.x) return a.x < b.x;
+		if (a.y != b.y) return a.y < b.y;
+		return a.z < b.z;
+	});
+	points.erase(std::unique(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
+	{
+		return a.x == b.x && a.y == b.y && a.z == b.z;
+	}), points.end());
+
+	return ConvexHull3(points);
 }
 
 // ----------------------------------------------------------------------------
@@ -512,10 +530,10 @@ struct Edge
 };
 
 
-OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &points, const vec3 &dir0, const vec3 &dir1);
+static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &points, const vec3 &dir0, const vec3 &dir1);
 
 // Finds the extreme (min and max) points along a direction.
-void ExtremePointsAlongDirection(const std::vector<vec3> &points, const vec3 &dir,
+static void ExtremePointsAlongDirection(const std::vector<vec3> &points, const vec3 &dir,
 	int &idxSmallest, int &idxLargest, float &smallestD, float &largestD)
 {
 	int n = (int)points.size();
@@ -539,7 +557,7 @@ void ExtremePointsAlongDirection(const std::vector<vec3> &points, const vec3 &di
 }
 
 // Port of SmallestOBBVolumeJiggle().
-float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointArray,
+static float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointArray,
 	std::vector<float2> &pts, vec3 &outEdgeA, vec3 &outEdgeB)
 {
 	vec3 edge = edge_;
@@ -596,7 +614,7 @@ float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointA
 }
 
 // Port of SmallestOBBVolume2DPlanar() (with a 1D guard for collinear input).
-OBB SmallestOBBVolume2DPlanar(const std::vector<vec3> &pointArray)
+static OBB SmallestOBBVolume2DPlanar(const std::vector<vec3> &pointArray)
 {
 	const int numPoints = (int)pointArray.size();
 
@@ -813,7 +831,7 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 }
 
 // Moves the floating point sign bit from src to dst.
-inline void MoveSign(float &dst, float &src)
+static inline void MoveSign(float &dst, float &src)
 {
 	if (src < 0.f)
 	{
@@ -823,7 +841,7 @@ inline void MoveSign(float &dst, float &src)
 }
 
 // Port of ComputeBasis().
-int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
+static int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 	const vec3 &f2a, const vec3 &f2b,
 	const vec3 &f3a, const vec3 &f3b,
 	vec3 *n1,
@@ -918,7 +936,7 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 }
 
 // Port of AreEdgesCompatibleForOBB().
-bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b)
+static bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b)
 {
 	const vec3 f1a_f1b = f1a - f1b;
 	const vec3 f2a_f2b = f2a - f2b;
@@ -955,7 +973,7 @@ bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a,
 }
 
 // Port of AreCompatibleOpposingEdges().
-bool AreCompatibleOpposingEdges(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b, vec3 &outN)
+static bool AreCompatibleOpposingEdges(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b, vec3 &outN)
 {
 	/*
 		n1 = f1a*t + f1b*(1-t)
@@ -999,7 +1017,7 @@ bool AreCompatibleOpposingEdges(const vec3 &f1a, const vec3 &f1b, const vec3 &f2
 }
 
 // Port of IsVertexAntipodalToEdge().
-bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const std::vector<int> &neighbors, const vec3 &f1a, const vec3 &f1b)
+static bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const std::vector<int> &neighbors, const vec3 &f1a, const vec3 &f1b)
 {
 	float tMin = 0.f;
 	float tMax = 1.f;
@@ -1047,7 +1065,7 @@ bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const std::vect
 }
 
 // Port of TestThreeAdjacentFaces().
-void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
+static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 	int edgeI, int edgeJ, int edgeK,
 	const std::vector<vec3> &hullV, const std::vector<Edge> &edges,
 	const std::vector<std::vector<int>> &antipodalPointsForEdge,
@@ -1087,7 +1105,7 @@ void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
-OBB OptimalEnclosingOBB3D(const Hull3 &hull)
+static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 {
 	/* Outline of the algorithm (from the original):
 	  0. Compute the convex hull of the point set (done by the caller)
@@ -1525,7 +1543,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	return minOBB;
 }
 
-OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3 &dir0, const vec3 &dir1)
+static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3 &dir0, const vec3 &dir1)
 {
 	int d0, d1;
 	float mind0, maxd0, mind1, maxd1, mind2, maxd2;
@@ -1544,8 +1562,6 @@ OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3
 	minOBB.r = vec3(rd0, rd1, rd2);
 	return minOBB;
 }
-
-} // namespace
 
 // ----------------------------------------------------------------------------
 // Public entry point
