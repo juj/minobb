@@ -1,2 +1,9 @@
 tmp
 nul
+test/glb/**/*.glb
+test/glb/**/*.json
+test/glb/**/*.json.err
+__pycache__
+.objaverse
+*.gz
+*.exe
