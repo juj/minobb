@@ -672,6 +672,20 @@ int main(int argc, char **argv)
 		return 1;
 
 	const int total_pts = (int)(pts.size() / 3);
+
+	// AABB #1: over all original world-space vertices (before any subsampling).
+	vec3 aabb_v_min(pts[0], pts[1], pts[2]), aabb_v_max(aabb_v_min);
+	for (int i = 0; i < total_pts; i++)
+	{
+		const vec3 p(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]);
+		aabb_v_min.x = std::min(aabb_v_min.x, p.x);
+		aabb_v_min.y = std::min(aabb_v_min.y, p.y);
+		aabb_v_min.z = std::min(aabb_v_min.z, p.z);
+		aabb_v_max.x = std::max(aabb_v_max.x, p.x);
+		aabb_v_max.y = std::max(aabb_v_max.y, p.y);
+		aabb_v_max.z = std::max(aabb_v_max.z, p.z);
+	}
+
 	SubsampleGrid(pts, max_points);
 
 	int num_pts = (int)(pts.size() / 3);
@@ -715,6 +729,34 @@ int main(int argc, char **argv)
 	}
 	printf(hull.f.empty() ? "]\n" : "\n    ]\n");
 	printf("  },\n");
+
+	// AABB #2: over the convex hull vertices only.
+	vec3 aabb_h_min(0.f, 0.f, 0.f), aabb_h_max(0.f, 0.f, 0.f);
+	if (!hull.v.empty())
+	{
+		aabb_h_min = aabb_h_max = hull.v[0];
+		for (const vec3 &p : hull.v)
+		{
+			aabb_h_min.x = std::min(aabb_h_min.x, p.x);
+			aabb_h_min.y = std::min(aabb_h_min.y, p.y);
+			aabb_h_min.z = std::min(aabb_h_min.z, p.z);
+			aabb_h_max.x = std::max(aabb_h_max.x, p.x);
+			aabb_h_max.y = std::max(aabb_h_max.y, p.y);
+			aabb_h_max.z = std::max(aabb_h_max.z, p.z);
+		}
+	}
+	auto print_aabb = [](const char *name, const vec3 &mn, const vec3 &mx) {
+		printf("  \"%s\": {\n", name);
+		printf("    \"min\": [%.9g, %.9g, %.9g],\n", mn.x, mn.y, mn.z);
+		printf("    \"max\": [%.9g, %.9g, %.9g],\n", mx.x, mx.y, mx.z);
+		printf("    \"center\": [%.9g, %.9g, %.9g],\n",
+			mn.x + (mx.x - mn.x) * 0.5f, mn.y + (mx.y - mn.y) * 0.5f, mn.z + (mx.z - mn.z) * 0.5f);
+		printf("    \"size\": [%.9g, %.9g, %.9g],\n", mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+		printf("    \"volume\": %.9g\n", (mx.x - mn.x) * (mx.y - mn.y) * (mx.z - mn.z));
+		printf("  },\n");
+	};
+	print_aabb("aabb_vertices", aabb_v_min, aabb_v_max);
+	print_aabb("aabb_hull", aabb_h_min, aabb_h_max);
 
 	printf("  \"obb\": {\n");
 	printf("    \"degenerate\": %s,\n", obb.IsDegenerate() ? "true" : "false");
