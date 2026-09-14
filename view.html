@@ -10,8 +10,14 @@
     position: absolute; top: 8px; left: 8px; z-index: 10;
     font: 13px/1.5 monospace; color: #ddd;
     background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 4px;
-    white-space: pre; pointer-events: none;
   }
+  #hudtext { white-space: pre; }
+  #hud label {
+    display: block; margin-top: 4px; cursor: pointer;
+    user-select: none; white-space: pre;
+  }
+  #hud label.disabled { opacity: 0.4; cursor: default; }
+  #hud input { vertical-align: middle; }
 </style>
 <script type="importmap">
 {
@@ -23,7 +29,12 @@
 </script>
 </head>
 <body>
-<div id="hud">loading...</div>
+<div id="hud">
+  <div id="hudtext">loading...</div>
+  <label id="lbl-hull"><input type="checkbox" id="cb-hull" checked> Show Convex Hull</label>
+  <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB</label>
+  <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB</label>
+</div>
 <canvas id="app"></canvas>
 <script type="module">
 import * as THREE from 'three';
@@ -32,7 +43,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const params = new URLSearchParams(location.search);
 const url = params.get('url');
-const hud = document.getElementById('hud');
+const hudText = document.getElementById('hudtext');
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x202020);
@@ -159,14 +170,52 @@ function polyhedronVolume(vertices, faces) {
   return Math.abs(vol) / 6;
 }
 
+// Overlay groups, toggled by the checkboxes in the HUD panel.
+let hullGroup = null, obbGroup = null, aabbGroups = [];
+
+const cbHull = document.getElementById('cb-hull');
+const cbOBB = document.getElementById('cb-obb');
+const cbAABB = document.getElementById('cb-aabb');
+
+// Checkbox state persists across pages via localStorage.
+const PREFS_KEY = 'minobb_view_overlays';
+function savePrefs() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({
+      hull: cbHull.checked, obb: cbOBB.checked, aabb: cbAABB.checked
+    }));
+  } catch (e) { /* storage unavailable (private mode etc.): ignore */ }
+}
+try {
+  const prefs = JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+  if (typeof prefs.hull === 'boolean') cbHull.checked = prefs.hull;
+  if (typeof prefs.obb === 'boolean') cbOBB.checked = prefs.obb;
+  if (typeof prefs.aabb === 'boolean') cbAABB.checked = prefs.aabb;
+} catch (e) { /* corrupted/absent prefs: keep defaults */ }
+
+cbHull.addEventListener('change', () => { if (hullGroup) hullGroup.visible = cbHull.checked; savePrefs(); });
+cbOBB.addEventListener('change', () => { if (obbGroup) obbGroup.visible = cbOBB.checked; savePrefs(); });
+cbAABB.addEventListener('change', () => {
+  for (const g of aabbGroups) g.visible = cbAABB.checked;
+  savePrefs();
+});
+// Disables a checkbox when its overlay does not exist in the JSON.
+function bindCheckbox(cb, label, groupExists) {
+  cb.disabled = !groupExists;
+  label.classList.toggle('disabled', !groupExists);
+}
+
 function fail(msg) {
-  hud.textContent = msg;
+  hudText.textContent = msg;
+  bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+  bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
+  bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
 }
 
 if (!url) {
   fail('no ?url= query parameter.\nusage: view.html?url=test/glb/.../foo.glb');
 } else {
-  hud.textContent = 'loading ' + url + ' ...';
+  hudText.textContent = 'loading ' + url + ' ...';
   new GLTFLoader().load(
     url,
     async (gltf) => {
@@ -184,18 +233,33 @@ if (!url) {
           const parent = model;
           if (data.hull && data.hull.vertices && data.hull.vertices.length &&
               data.hull.faces && data.hull.faces.length) {
-            parent.add(drawHull(data.hull));
+            hullGroup = drawHull(data.hull);
+            hullGroup.visible = cbHull.checked;
+            parent.add(hullGroup);
           }
           let obbOk = false;
           if (data.obb && !data.obb.degenerate &&
               data.obb.half_extents.every(h => h > 0)) {
-            parent.add(drawOBB(data.obb));
+            obbGroup = drawOBB(data.obb);
+            obbGroup.visible = cbOBB.checked;
+            parent.add(obbGroup);
             obbOk = true;
           }
-          if (data.aabb_vertices)
-            parent.add(drawAABB({ ...data.aabb_vertices, color: 0x44ff44 })); // green: all vertices
-          if (data.aabb_hull)
-            parent.add(drawAABB({ ...data.aabb_hull, color: 0xff44ff }));     // magenta: hull vertices
+          if (data.aabb_vertices) {
+            const g = drawAABB({ ...data.aabb_vertices, color: 0x44ff44 }); // green: all vertices
+            g.visible = cbAABB.checked;
+            parent.add(g);
+            aabbGroups.push(g);
+          }
+          if (data.aabb_hull) {
+            const g = drawAABB({ ...data.aabb_hull, color: 0xff44ff });     // magenta: hull vertices
+            g.visible = cbAABB.checked;
+            parent.add(g);
+            aabbGroups.push(g);
+          }
+          bindCheckbox(cbHull, document.getElementById('lbl-hull'), !!hullGroup);
+          bindCheckbox(cbOBB, document.getElementById('lbl-obb'), !!obbGroup);
+          bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), aabbGroups.length > 0);
 
           let stats = `hull: ${data.hull ? data.hull.vertices.length + 'v / ' + data.hull.faces.length + 'f' : '-'}  ` +
                       (obbOk ? 'obb: yes' : 'obb: no');
@@ -221,13 +285,19 @@ if (!url) {
           overlays = stats;
         } else {
           overlays = 'none (' + jsonUrl + ' -> HTTP ' + resp.status + ')';
+          bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+          bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
+          bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
         }
       } catch (e) {
         overlays = 'none (fetch failed: ' + e + ')';
+        bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+        bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
+        bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
       }
 
       fitCamera(model);
-      hud.textContent = url + '\n' + overlays;
+      hudText.textContent = url + '\n' + overlays;
     },
     undefined,
     (err) => fail('failed to load ' + url + '\n' + err)

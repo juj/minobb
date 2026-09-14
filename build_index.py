@@ -3,10 +3,26 @@
 to view.html?url=<relative path>. Run from the repo root: python build_index.py"""
 
 import html
+import json
 import os
 
 GLB_DIR = "test/glb"
 OUT_FILE = "glb.html"
+
+
+def load_timing(p: str):
+    """Total hull+obb generation time in seconds from the sibling .json,
+    or None if the .json is missing or has no timing info."""
+    path = os.path.splitext(p)[0] + ".json"
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        t = data.get("timing", {})
+        return float(t.get("hull_sec", 0.0)) + float(t.get("obb_sec", 0.0))
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def main() -> None:
@@ -15,15 +31,27 @@ def main() -> None:
         for name in filenames:
             if name.lower().endswith(".glb"):
                 glb_paths.append(os.path.join(dirpath, name))
-    glb_paths.sort()
+
+    # Sort by total generation time, slowest first; entries without timing
+    # info (no .json) go last, alphabetically.
+    def sort_key(p):
+        t = load_timing(p)
+        if t is None:
+            return (1, 0.0, p)
+        return (0, -t, p)
+
+    glb_paths.sort(key=sort_key)
 
     rows = []
     for p in glb_paths:
         url = p.replace(os.sep, "/")
         label = os.path.basename(p)
         folder = os.path.basename(os.path.dirname(p))
-        has_json = os.path.exists(os.path.splitext(p)[0] + ".json")
-        marker = " [hull+obb]" if has_json else ""
+        t = load_timing(p)
+        if t is None:
+            marker = ""
+        else:
+            marker = f" [hull+obb {t:.3f}s]"
         rows.append(
             f'    <li><a href="view.html?url={html.escape(url, quote=True)}">'
             f'{html.escape(label)}{html.escape(marker)}</a> '

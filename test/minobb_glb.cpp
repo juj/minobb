@@ -17,7 +17,7 @@
 
 #include "minobb.h"
 
-#include <chrono>
+#include <windows.h>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +26,20 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// High-resolution timing (Windows QueryPerformanceCounter).
+// ---------------------------------------------------------------------------
+
+static double NowSeconds()
+{
+	static LARGE_INTEGER freq = {};
+	if (freq.QuadPart == 0)
+		QueryPerformanceFrequency(&freq);
+	LARGE_INTEGER cnt;
+	QueryPerformanceCounter(&cnt);
+	return (double)cnt.QuadPart / (double)freq.QuadPart;
+}
 
 // ---------------------------------------------------------------------------
 // Minimal JSON parser (just enough for glTF JSON chunks).
@@ -694,23 +708,28 @@ int main(int argc, char **argv)
 		fprintf(stderr, "info: subsampled to %d points (uniform grid, max_points=%zu)\n",
 			num_pts, max_points);
 
-	// Compute the convex hull and the minimum-volume OBB.
-	auto t0 = std::chrono::steady_clock::now();
+	// Compute the convex hull and the minimum-volume OBB (timed with
+	// QueryPerformanceCounter; the times are stored in the JSON output).
+	double t0 = NowSeconds();
 	Hull3 hull = convex_hull(pts.data(), num_pts, 12);
-	auto t1 = std::chrono::steady_clock::now();
+	double t1 = NowSeconds();
 	OBB obb = minobb(pts.data(), num_pts, 12);
-	auto t2 = std::chrono::steady_clock::now();
-	fprintf(stderr, "info: hull: %zu verts, %zu faces (%.2fs)\n",
-		hull.v.size(), hull.f.size(),
-		std::chrono::duration<double>(t1 - t0).count());
-	fprintf(stderr, "info: obb: volume %g (%.2fs)\n",
-		obb.Volume(), std::chrono::duration<double>(t2 - t1).count());
+	double t2 = NowSeconds();
+	const double hull_sec = t1 - t0;
+	const double obb_sec = t2 - t1;
+	fprintf(stderr, "info: hull: %zu verts, %zu faces (%.3fs)\n",
+		hull.v.size(), hull.f.size(), hull_sec);
+	fprintf(stderr, "info: obb: volume %g (%.3fs)\n", obb.Volume(), obb_sec);
 
 	// Print the results as a single JSON document.
 	printf("{\n");
 	printf("  \"vertices\": %d,\n", num_pts);
 	if (num_pts < total_pts)
 		printf("  \"subsampled_from\": %d,\n", total_pts);
+	printf("  \"timing\": {\n");
+	printf("    \"hull_sec\": %.6f,\n", hull_sec);
+	printf("    \"obb_sec\": %.6f\n", obb_sec);
+	printf("  },\n");
 
 	printf("  \"hull\": {\n");
 	printf("    \"degenerate\": %s,\n", hull.IsDegenerate() ? "true" : "false");
