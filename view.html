@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GLB viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #202020; }
+  #app { width: 100%; height: 100%; display: block; }
+  #hud {
+    position: absolute; top: 8px; left: 8px; z-index: 10;
+    font: 13px/1.5 monospace; color: #ddd;
+    background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 4px;
+    white-space: pre; pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">loading...</div>
+<canvas id="app"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const params = new URLSearchParams(location.search);
+const url = params.get('url');
+const hud = document.getElementById('hud');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202020);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1e-6, 1e6);
+camera.position.set(3, 2, 3);
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('app'), antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+dir.position.set(1, 2, 1.5);
+scene.add(dir);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function fitCamera(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  controls.target.copy(center);
+  camera.near = maxDim / 1e4;
+  camera.far = maxDim * 1e4;
+  camera.position.copy(center).add(new THREE.Vector3(maxDim * 1.2, maxDim * 0.9, maxDim * 1.4));
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+// Draws the OBB from the minobb_glb JSON as a translucent box + edge lines.
+// minobb's LocalToOBB(p) = dot(axis[i], p - center): box-local coords are
+// R*(p - center) with the axes as the ROWS of R, so world = center + R^T*q
+// and the BoxGeometry matrix has the axes as rows (translation = center).
+function drawOBB(obb) {
+  const group = new THREE.Group();
+  // obb.size is the FULL dimension (2 * half_extents); BoxGeometry takes full dimensions.
+  const geo = new THREE.BoxGeometry(obb.size[0], obb.size[1], obb.size[2]);
+  const m = new THREE.Matrix4();
+  const a = obb.axes; // a[0..2] = axis vectors
+
+  m.set(
+    a[0][0], a[1][0], a[2][0], obb.center[0],
+    a[0][1], a[1][1], a[2][1], obb.center[1],
+    a[0][2], a[1][2], a[2][2], obb.center[2],
+    0, 0, 0, 1);
+
+  geo.applyMatrix4(m);
+  const box = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0xff8800, transparent: true, opacity: 0.25, depthWrite: false, side: THREE.DoubleSide
+  }));
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0xff8800 })
+  );
+  group.add(box, edges);
+  return group;
+}
+
+// Draws the convex hull from the minobb_glb JSON as translucent triangles + edges.
+function drawHull(hull) {
+  const pos = new Float32Array(hull.vertices.length * 3);
+  hull.vertices.forEach((v, i) => {
+    pos[i * 3] = v[0]; pos[i * 3 + 1] = v[1]; pos[i * 3 + 2] = v[2];
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const idx = [];
+  for (const f of hull.faces) for (const i of f) idx.push(i);
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0x33ccff, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide
+  }));
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo, 1),
+    new THREE.LineBasicMaterial({ color: 0x33ccff, transparent: true, opacity: 0.7 })
+  );
+  group.add(mesh, edges);
+  return group;
+}
+
+function fail(msg) {
+  hud.textContent = msg;
+}
+
+if (!url) {
+  fail('no ?url= query parameter.\nusage: view.html?url=test/glb/.../foo.glb');
+} else {
+  hud.textContent = 'loading ' + url + ' ...';
+  new GLTFLoader().load(
+    url,
+    async (gltf) => {
+      const model = gltf.scene;
+      scene.add(model);
+
+      // minobb_glb computes the hull/OBB in scene (world) space over all
+      // meshes, so the overlays are added to the scene root.
+      let overlays = 'none (no sibling .json)';
+      const jsonUrl = url.replace(/\.glb$/i, '.json');
+      try {
+        const resp = await fetch(jsonUrl);
+        if (resp.ok) {
+          const data = await resp.json();
+          const parent = model;
+          if (data.hull && data.hull.vertices && data.hull.vertices.length &&
+              data.hull.faces && data.hull.faces.length) {
+            parent.add(drawHull(data.hull));
+          }
+          let obbOk = false;
+          if (data.obb && !data.obb.degenerate &&
+              data.obb.half_extents.every(h => h > 0)) {
+            parent.add(drawOBB(data.obb));
+            obbOk = true;
+          }
+          overlays = `hull: ${data.hull ? data.hull.vertices.length + 'v / ' + data.hull.faces.length + 'f' : '-'}  ` +
+                     (obbOk ? 'obb: yes, vol=' + data.obb.volume : 'obb: no');
+        } else {
+          overlays = 'none (' + jsonUrl + ' -> HTTP ' + resp.status + ')';
+        }
+      } catch (e) {
+        overlays = 'none (fetch failed: ' + e + ')';
+      }
+
+      fitCamera(model);
+      hud.textContent = url + '\n' + overlays;
+    },
+    undefined,
+    (err) => fail('failed to load ' + url + '\n' + err)
+  );
+}
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

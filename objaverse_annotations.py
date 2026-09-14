@@ -26,7 +26,7 @@ def main():
         download_dir=ANNOTATIONS_DIR
     )
 
-    samples = annotations.sample(n=N_OBJECTS, random_state=42)
+    samples = annotations.sample(n=N_OBJECTS, random_state=43)
 
     downloaded = SketchfabDownloader.download_objects(
         samples,
