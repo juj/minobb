@@ -19,7 +19,7 @@ int main(int argc, char **argv)
 			vec3 p(v[3*i], v[3*i+1], v[3*i+2]);
 			vec3 lp = o.LocalToWorldInverse(p);
 			for (int j = 0; j < 3; ++j)
-				if (Absf(lp[j]) - o.r[j] > worst) { worst = Absf(lp[j]) - o.r[j]; wv = i; wa = j; }
+				if (fabsf(lp[j]) - o.r[j] > worst) { worst = fabsf(lp[j]) - o.r[j]; wv = i; wa = j; }
 		}
 		printf("%s: n=%d vol=%.6f worstViolation=%.3e (point %d axis %d) degenerate=%d\n",
 			argv[a], n, o.Volume(), worst, wv, wa, (int)o.IsDegenerate());

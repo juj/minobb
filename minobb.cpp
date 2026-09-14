@@ -72,12 +72,11 @@ namespace
 // Small math helpers
 // ----------------------------------------------------------------------------
 
-inline float Absf(float x) { return x < 0.f ? -x : x; }
 inline float Minf(float a, float b) { return a < b ? a : b; }
 inline float Maxf(float a, float b) { return a > b ? a : b; }
 inline float Max3f(float a, float b, float c) { return Maxf(Maxf(a, b), c); }
 // Same semantics as MathGeoLib's EqualAbs(): |a - b| < epsilon (default 1e-4).
-inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return Absf(a - b) < epsilon; }
+inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
 
 float LengthSq(const vec3 &v) { return dot(v, v); }
 
@@ -105,7 +104,7 @@ vec3 Normalized(const vec3 &v)
 vec3 Perpendicular(const vec3 &v)
 {
 	// Choose the smallest magnitude component and cross with the corresponding unit axis.
-	const float ax = Absf(v.x), ay = Absf(v.y), az = Absf(v.z);
+	const float ax = fabsf(v.x), ay = fabsf(v.y), az = fabsf(v.z);
 	vec3 dir = (ax < ay && ax < az) ? vec3(1.f, 0.f, 0.f) :
 	           (ay < az)           ? vec3(0.f, 1.f, 0.f) : vec3(0.f, 0.f, 1.f);
 	return cross(dir, v);
@@ -278,7 +277,7 @@ float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDir, floa
 		float minv = ed.Dot(*e[1]);
 		float maxv = ed.Dot(*e[3]);
 
-		float area = Absf((maxu - minu) * (maxv - minv));
+		float area = fabsf((maxu - minu) * (maxv - minv));
 		if (area < minArea)
 		{
 			vDir = ed;
@@ -332,7 +331,7 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 
 	float scale = 1.f;
 	for (int i = 0; i < n; ++i)
-		scale = Maxf(scale, Max3f(Absf(pts[i].x), Absf(pts[i].y), Absf(pts[i].z)));
+		scale = Maxf(scale, Max3f(fabsf(pts[i].x), fabsf(pts[i].y), fabsf(pts[i].z)));
 
 	// Find four affinely independent points to bootstrap with.
 	int ia = -1, ib = -1, ic = -1, id = -1;
@@ -345,7 +344,7 @@ Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 				float abArea = LengthSq(cross(a, b));
 				for (int l = k + 1; l < n && ia == -1; ++l)
 				{
-					float det = Absf(dot(cross(a, b), pts[l] - pts[i]));
+					float det = fabsf(dot(cross(a, b), pts[l] - pts[i]));
 					// Require a non-degenerate volume relative to the point spread.
 					if (det > 1e-10f * scale * (1.f + abArea))
 					{
@@ -555,7 +554,7 @@ float SmallestOBBVolumeJiggle(const vec3 &edge_, const std::vector<vec3> &pointA
 		int e1, e2;
 		float dummy1, dummy2;
 		ExtremePointsAlongDirection(pointArray, edge, e1, e2, dummy1, dummy2);
-		float edgeLength = Absf(dot(pointArray[e1] - pointArray[e2], edge));
+		float edgeLength = fabsf(dot(pointArray[e1] - pointArray[e2], edge));
 
 		vec3 u, v;
 		PerpendicularBasis(edge, u, v);
@@ -709,7 +708,7 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 	// and the min-rectangle side direction w in the perpendicular plane.
 	auto eval = [&](const vec3 &n1, float &vol, vec3 &w)
 	{
-		vec3 up = Absf(n1.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f);
+		vec3 up = fabsf(n1.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f);
 		vec3 u = Normalized(cross(n1, up));
 		vec3 v = cross(n1, u);
 		float amin = FLT_MAX, amax = -FLT_MAX;
@@ -781,7 +780,7 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 	for (int lvl = 0; lvl < 5 && bestVol > 0.f; ++lvl)
 	{
 		float half = 1.5f * powf(0.1f, (float)lvl); // degrees
-		vec3 t1 = Normalized(cross(bestN, Absf(bestN.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f)));
+		vec3 t1 = Normalized(cross(bestN, fabsf(bestN.z) > 0.9f ? vec3(1.f, 0.f, 0.f) : vec3(0.f, 0.f, 1.f)));
 		vec3 t2 = cross(bestN, t1);
 		float lv = bestVol;
 		vec3 ln = bestN;
@@ -854,7 +853,7 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 
 		float s = l*l - 4.f*m*k;
 
-		if (Absf(m) < 1e-5f || Absf(s) < 1e-5f)
+		if (fabsf(m) < 1e-5f || fabsf(s) < 1e-5f)
 		{
 			// The equation is linear instead.
 			float v = -k / l;
@@ -867,9 +866,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 				n1[0] = Normalized(a + b*t);
 				n2[0] = Normalized(c + d*u);
 				n3[0] = Normalized(e + f*v);
-				if (Absf(dot(n1[0], n2[0])) < angleEps
-					&& Absf(dot(n1[0], n3[0])) < angleEps
-					&& Absf(dot(n2[0], n3[0])) < angleEps)
+				if (fabsf(dot(n1[0], n2[0])) < angleEps
+					&& fabsf(dot(n1[0], n3[0])) < angleEps
+					&& fabsf(dot(n2[0], n3[0])) < angleEps)
 					return 1;
 				else
 					return 0;
@@ -897,9 +896,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 			n2[nSolutions] = Normalized(c + d*U1);
 			n3[nSolutions] = Normalized(e + f*V1);
 
-			if (Absf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
-				&& Absf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
-				&& Absf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
+			if (fabsf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
+				&& fabsf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
+				&& fabsf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
 				++nSolutions;
 		}
 		if (V2 >= -eps && T2 >= -eps && U2 >= -eps && V2 <= 1.f + eps && T2 <= 1.f + eps && U2 <= 1.f + eps)
@@ -907,9 +906,9 @@ int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 			n1[nSolutions] = Normalized(a + b*T2);
 			n2[nSolutions] = Normalized(c + d*U2);
 			n3[nSolutions] = Normalized(e + f*V2);
-			if (Absf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
-				&& Absf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
-				&& Absf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
+			if (fabsf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
+				&& fabsf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
+				&& fabsf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
 				++nSolutions;
 		}
 		if (s < 1e-4f && nSolutions == 2)
@@ -981,7 +980,7 @@ bool AreCompatibleOpposingEdges(const vec3 &f1a, const vec3 &f1b, const vec3 &f2
 	const vec3 rhs = -f1b;
 
 	float det = dot(col0, cross(col1, col2));
-	if (Absf(det) < 1e-12f)
+	if (fabsf(det) < 1e-12f)
 		return false;
 
 	float c  = dot(rhs,   cross(col1, col2)) / det;
