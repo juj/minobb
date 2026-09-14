@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstring>
+#include <set>
 
 // ----------------------------------------------------------------------------
 // vec3 and OBB implementations
@@ -297,6 +298,76 @@ static float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDi
 // 3D convex hull (simple incremental algorithm, O(n^2) typical)
 // ----------------------------------------------------------------------------
 
+// Double-precision vector and operators for the hull predicates. The input
+// points are float32, and the point-vs-face-plane tests need more guard digits
+// than float leaves after the coordinates themselves: with float arithmetic a
+// coplanar point can measure "outside" a face by pure representation error,
+// which corrupts the visible-region topology. All hull construction is done in
+// double and converted back to float at the end (the hull vertices are original
+// input points, so the conversion is exact).
+struct dvec3
+{
+	double x, y, z;
+};
+static inline dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
+static inline dvec3 dmul(const dvec3 &a, double s) { return dvec3{a.x * s, a.y * s, a.z * s}; }
+static inline double ddot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline dvec3 dcross(const dvec3 &a, const dvec3 &b)
+{
+	return dvec3{a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x};
+}
+static inline double dlen2(const dvec3 &a) { return ddot(a, a); }
+static inline dvec3 dnormalize(const dvec3 &a)
+{
+	double l = std::sqrt(dlen2(a));
+	return l > 0.0 ? dmul(a, 1.0 / l) : dvec3{0.0, 0.0, 0.0};
+}
+
+// Validates a hull built in double precision:
+//  - every undirected edge belongs to exactly two faces,
+//  - the Euler characteristic holds (F == 2*V - 4 for a closed convex polyhedron),
+//  - no face has zero area,
+//  - every vertex lies on or behind every face plane, within the coplanarity
+//    tolerance (convexity / outward orientation).
+static bool HullValid(const std::vector<dvec3> &v, const std::vector<std::vector<int>> &f, double scale)
+{
+	const double eps = 1e-6 * scale;
+	const size_t V = v.size(), F = f.size();
+	if (F != 2 * V - 4)
+		return false;
+	std::multiset<std::pair<int, int>> edges;
+	for (size_t fi = 0; fi < F; ++fi)
+		for (int j = 0; j < 3; ++j)
+		{
+			int a = f[fi][j], b = f[fi][(j + 1) % 3];
+			edges.insert(std::make_pair(std::min(a, b), std::max(a, b)));
+		}
+	for (auto it = edges.begin(); it != edges.end(); )
+	{
+		auto range = edges.equal_range(*it);
+		if (std::distance(range.first, range.second) != 2)
+			return false;
+		it = range.second;
+	}
+	for (size_t fi = 0; fi < F; ++fi)
+	{
+		const std::vector<int> &face = f[fi];
+		dvec3 n = dcross(dsub(v[face[1]], v[face[0]]), dsub(v[face[2]], v[face[0]]));
+		if (dlen2(n) <= 0.0)
+			return false; // Degenerate (zero-area) face.
+		const double nlen = std::sqrt(dlen2(n));
+		for (size_t vi = 0; vi < V; ++vi)
+		{
+			int idx = (int)vi;
+			if (idx == face[0] || idx == face[1] || idx == face[2])
+				continue;
+			if (ddot(n, dsub(v[idx], v[face[0]])) > eps * nlen)
+				return false; // A vertex pokes through the face: non-convex.
+		}
+	}
+	return true;
+}
+
 static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
 	Hull3 hull;
@@ -317,31 +388,70 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	if (n == 0)
 		return hull;
 
-	float scale = 1.f;
+	// Work in double precision (see dvec3 above).
+	std::vector<dvec3> P((size_t)n);
+	double scale = 1.0;
 	for (int i = 0; i < n; ++i)
-		scale = fmaxf(scale, hmax(vec3(fabsf(pts[i].x), fabsf(pts[i].y), fabsf(pts[i].z))));
+	{
+		P[i] = dvec3{(double)pts[i].x, (double)pts[i].y, (double)pts[i].z};
+		scale = std::max(scale, std::sqrt(dlen2(P[i])));
+	}
+	const double eps = 1e-6 * scale; // Coplanarity tolerance (true distance).
 
-	// Find four affinely independent points to bootstrap with.
-	int ia = -1, ib = -1, ic = -1, id = -1;
-	for (int i = 0; i < n && ia == -1; ++i)
-		for (int j = i + 1; j < n && ia == -1; ++j)
-			for (int k = j + 1; k < n && ia == -1; ++k)
-			{
-				vec3 a = pts[j] - pts[i];
-				vec3 b = pts[k] - pts[i];
-				float abArea = LengthSq(cross(a, b));
-				for (int l = k + 1; l < n && ia == -1; ++l)
-				{
-					float det = fabsf(dot(cross(a, b), pts[l] - pts[i]));
-					// Require a non-degenerate volume relative to the point spread.
-					if (det > 1e-10f * scale * (1.f + abArea))
-					{
-						ia = i; ib = j; ic = k; id = l;
-					}
-				}
-			}
-
-	if (ia == -1)
+	// Robust bootstrap: a well-conditioned tetrahedron. Take a lexicographic
+	// extreme point, a near-diameter partner (two farthest-point rounds), the
+	// point farthest from that line, and the point farthest from the plane
+	// through the three. All O(n). The original "first non-degenerate
+	// tetrahedron" choice is nearly degenerate for thin/curved point clouds and
+	// makes the incremental construction numerically unstable.
+	int ia = 0;
+	for (int i = 1; i < n; ++i)
+		if (P[i].x < P[ia].x || (P[i].x == P[ia].x &&
+		    (P[i].y < P[ia].y || (P[i].y == P[ia].y && P[i].z < P[ia].z))))
+			ia = i;
+	auto farthestFrom = [&](int from)
+	{
+		int best = -1;
+		double bestD = -1.0;
+		for (int i = 0; i < n; ++i)
+		{
+			double d = dlen2(dsub(P[i], P[from]));
+			if (d > bestD) { bestD = d; best = i; }
+		}
+		return best;
+	};
+	int ib = farthestFrom(ia);
+	{
+		int r = farthestFrom(ib);
+		if (dlen2(dsub(P[r], P[ia])) > dlen2(dsub(P[ib], P[ia])))
+			ib = r;
+	}
+	dvec3 lineDir = dnormalize(dsub(P[ib], P[ia]));
+	int ic = ia;
+	{
+		double bestD = -1.0;
+		for (int i = 0; i < n; ++i)
+		{
+			dvec3 rel = dsub(P[i], P[ia]);
+			dvec3 perp = dsub(rel, dmul(lineDir, ddot(lineDir, rel)));
+			double d = dlen2(perp);
+			if (d > bestD) { bestD = d; ic = i; }
+		}
+	}
+	dvec3 baseN = dcross(dsub(P[ib], P[ia]), dsub(P[ic], P[ia]));
+	int id = ia;
+	{
+		double bestD = -1.0;
+		for (int i = 0; i < n; ++i)
+		{
+			double d = std::fabs(ddot(baseN, dsub(P[i], P[ia])));
+			if (d > bestD) { bestD = d; id = i; }
+		}
+	}
+	const double baseNLen = std::sqrt(dlen2(baseN));
+	const double tetThickness = baseNLen > 0.0
+		? std::fabs(ddot(baseN, dsub(P[id], P[ia]))) / baseNLen : 0.0;
+	if (baseNLen <= 1e-9 * scale || tetThickness <= 1e-9 * scale)
 	{
 		// The points are planar (or fewer than 4 unique points): signal degenerate so that
 		// the caller falls back to the 2D algorithm.
@@ -351,132 +461,171 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		return hull;
 	}
 
-	// Bootstrap with the tetrahedron (ia, ib, ic, id).
-	hull.v.push_back(pts[ia]);
-	hull.v.push_back(pts[ib]);
-	hull.v.push_back(pts[ic]);
-	hull.v.push_back(pts[id]);
-
-	// Add a face, making sure it is oriented CCW from outside (the normal points away
-	// from the interior, i.e. away from the given reference point `ref`).
-	auto addFace = [&](int a, int b, int c, int ref)
+	// Incremental construction in double precision. `order` is the insertion
+	// order of the remaining points. The result is order-independent in exact
+	// arithmetic, but for near-coplanar inputs micro-slivers can occur whose
+	// occurrence is order-dependent, so the caller validates the result and can
+	// retry with a different order.
+	auto buildWithOrder = [&](const std::vector<int> &order,
+					    std::vector<dvec3> &hv, std::vector<std::vector<int>> &hf)
 	{
-		vec3 n = cross(hull.v[b] - hull.v[a], hull.v[c] - hull.v[a]);
-		if (dot(n, hull.v[ref] - hull.v[a]) > 0.f)
-			std::swap(b, c); // Normal points towards the interior, flip.
-		hull.f.push_back({ a, b, c });
-	};
-	addFace(0, 1, 2, 3);
-	addFace(0, 1, 3, 2);
-	addFace(0, 2, 3, 1);
-	addFace(1, 2, 3, 0);
+		hv.clear();
+		hf.clear();
+		hv.push_back(P[ia]);
+		hv.push_back(P[ib]);
+		hv.push_back(P[ic]);
+		hv.push_back(P[id]);
 
-	// Incrementally insert the remaining points.
-	for (int i = 0; i < n; ++i)
-	{
-		if (i == ia || i == ib || i == ic || i == id)
-			continue;
-		const vec3 &q = pts[i];
-
-		// Find all faces visible from q.
-		std::vector<int> visible;
-		for (size_t fi = 0; fi < hull.f.size(); ++fi)
+		// Add a face, making sure it is oriented CCW from outside (the normal points
+		// away from the interior, i.e. away from the given reference point `ref`).
+		auto addFace = [&](int a, int b, int c, int ref)
 		{
-			const std::vector<int> &face = hull.f[fi];
-			vec3 n = Normalized(cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]));
-			// Distance from q to the face plane (positive = outside the hull).
-			float dist = dot(n, q - hull.v[face[0]]);
-			if (dist > 1e-6f * scale)
-				visible.push_back((int)fi);
-		}
-		if (visible.empty())
-			continue; // q is inside (or on) the hull.
+			dvec3 n = dcross(dsub(hv[b], hv[a]), dsub(hv[c], hv[a]));
+			if (ddot(n, dsub(hv[ref], hv[a])) > 0.0)
+				std::swap(b, c); // Normal points towards the interior, flip.
+			hf.push_back({ a, b, c });
+		};
+		addFace(0, 1, 2, 3);
+		addFace(0, 1, 3, 2);
+		addFace(0, 2, 3, 1);
+		addFace(1, 2, 3, 0);
 
-		// Collect the horizon: directed edges of the visible region that border a
-		// non-visible face.
-		struct DirEdge { int a, b; };
-		std::vector<DirEdge> visEdges;
-		for (int fi : visible)
+		for (int oi = 0; oi < (int)order.size(); ++oi)
 		{
-			const std::vector<int> &face = hull.f[fi];
-			visEdges.push_back({ face[0], face[1] });
-			visEdges.push_back({ face[1], face[2] });
-			visEdges.push_back({ face[2], face[0] });
-		}
-		std::vector<DirEdge> horizon;
-		for (const DirEdge &e : visEdges)
-		{
-			bool hasReverse = false;
-			for (const DirEdge &o : visEdges)
-				if (o.a == e.b && o.b == e.a)
-					hasReverse = true;
-			if (!hasReverse)
-				horizon.push_back(e);
-		}
-
-		int qIdx = (int)hull.v.size();
-		hull.v.push_back(q);
-
-		// Rebuild the faces: keep the non-visible ones, add a new face for each horizon edge.
-		std::vector<std::vector<int>> newFaces;
-		newFaces.reserve(hull.f.size());
-		for (size_t fi = 0; fi < hull.f.size(); ++fi)
-		{
-			bool vis = false;
-			for (int vfi : visible)
-				if ((int)fi == vfi) { vis = true; break; }
-			if (!vis)
-				newFaces.push_back(hull.f[fi]);
-		}
-		for (const DirEdge &he : horizon)
-			newFaces.push_back({ he.a, he.b, qIdx }); // (a, b, q) is outward oriented (horizon runs CCW around the hole).
-		hull.f.swap(newFaces);
-	}
-
-	// Robustness pass: ensure all face normals point strictly outward. On a valid
-	// convex hull every other vertex must lie on or behind the face plane.
-	for (size_t fi = 0; fi < hull.f.size(); ++fi)
-	{
-		std::vector<int> &face = hull.f[fi];
-		vec3 n = cross(hull.v[face[1]] - hull.v[face[0]], hull.v[face[2]] - hull.v[face[0]]);
-		for (size_t vi = 0; vi < hull.v.size(); ++vi)
-		{
-			int idx = (int)vi;
-			if (idx == face[0] || idx == face[1] || idx == face[2])
+			int i = order[oi];
+			if (i == ia || i == ib || i == ic || i == id)
 				continue;
-			if (dot(n, hull.v[idx] - hull.v[face[0]]) > 1e-9f * (1.f + LengthSq(n)) * scale)
+			const dvec3 &q = P[i];
+
+			// Find all faces visible from q.
+			std::vector<int> visible;
+			for (size_t fi = 0; fi < hf.size(); ++fi)
 			{
-				std::swap(face[1], face[2]);
-				break;
+				const std::vector<int> &face = hf[fi];
+				dvec3 n = dnormalize(dcross(dsub(hv[face[1]], hv[face[0]]), dsub(hv[face[2]], hv[face[0]])));
+				// Distance from q to the face plane (positive = outside the hull).
+				double dist = ddot(n, dsub(q, hv[face[0]]));
+				if (dist > eps)
+					visible.push_back((int)fi);
+			}
+			if (visible.empty())
+				continue; // q is inside (or on) the hull.
+
+			// Collect the horizon: directed edges of the visible region that border a
+			// non-visible face.
+			struct DirEdge { int a, b; };
+			std::vector<DirEdge> visEdges;
+			for (int fi : visible)
+			{
+				const std::vector<int> &face = hf[fi];
+				visEdges.push_back({ face[0], face[1] });
+				visEdges.push_back({ face[1], face[2] });
+				visEdges.push_back({ face[2], face[0] });
+			}
+			std::vector<DirEdge> horizon;
+			for (const DirEdge &e : visEdges)
+			{
+				bool hasReverse = false;
+				for (const DirEdge &o : visEdges)
+					if (o.a == e.b && o.b == e.a)
+					hasReverse = true;
+				if (!hasReverse)
+					horizon.push_back(e);
+			}
+
+			int qIdx = (int)hv.size();
+			hv.push_back(q);
+
+			// Rebuild the faces: keep the non-visible ones, add a new face for each horizon edge.
+			std::vector<std::vector<int>> newFaces;
+			newFaces.reserve(hf.size());
+			for (size_t fi = 0; fi < hf.size(); ++fi)
+			{
+				bool vis = false;
+				for (int vfi : visible)
+					if ((int)fi == vfi) { vis = true; break; }
+				if (!vis)
+					newFaces.push_back(hf[fi]);
+			}
+			for (const DirEdge &he : horizon)
+				newFaces.push_back({ he.a, he.b, qIdx }); // (a, b, q) is outward oriented (horizon runs CCW around the hole).
+			hf.swap(newFaces);
+		}
+
+		// Robustness pass: ensure all face normals point strictly outward. On a
+		// valid convex hull every other vertex must lie on or behind the face plane.
+		for (size_t fi = 0; fi < hf.size(); ++fi)
+		{
+			std::vector<int> &face = hf[fi];
+			dvec3 n = dcross(dsub(hv[face[1]], hv[face[0]]), dsub(hv[face[2]], hv[face[0]]));
+			const double nlen = std::sqrt(dlen2(n));
+			for (size_t vi = 0; vi < hv.size(); ++vi)
+			{
+				int idx = (int)vi;
+				if (idx == face[0] || idx == face[1] || idx == face[2])
+					continue;
+				if (ddot(n, dsub(hv[idx], hv[face[0]])) > eps * nlen)
+				{
+					std::swap(face[1], face[2]);
+					break;
+				}
 			}
 		}
-	}
 
-	// Remove vertices not referenced by any face (points that turned out to be
-	// interior during the incremental construction). The original
-	// Polyhedron::ConvexHull stores only the actual hull vertices; keeping the
-	// interior points around would make the antipodal search below O(E*n) in
-	// the input size instead of O(E*V_hull).
-	{
-		std::vector<unsigned char> used(hull.v.size(), 0);
-		for (size_t fi = 0; fi < hull.f.size(); ++fi)
-			for (size_t j = 0; j < hull.f[fi].size(); ++j)
-				used[hull.f[fi][j]] = 1;
-		std::vector<int> remap(hull.v.size(), -1);
-		std::vector<vec3> newV;
-		newV.reserve(hull.v.size());
-		for (size_t i = 0; i < hull.v.size(); ++i)
+		// Remove vertices not referenced by any face (points that turned out to be
+		// interior during the incremental construction). The original
+		// Polyhedron::ConvexHull stores only the actual hull vertices; keeping the
+		// interior points around would make the antipodal search below O(E*n) in
+		// the input size instead of O(E*V_hull).
+		std::vector<unsigned char> used(hv.size(), 0);
+		for (size_t fi = 0; fi < hf.size(); ++fi)
+			for (int j = 0; j < 3; ++j)
+				used[hf[fi][j]] = 1;
+		std::vector<int> remap(hv.size(), -1);
+		std::vector<dvec3> newV;
+		newV.reserve(hv.size());
+		for (size_t i = 0; i < hv.size(); ++i)
 			if (used[i])
 			{
 				remap[i] = (int)newV.size();
-				newV.push_back(hull.v[i]);
+				newV.push_back(hv[i]);
 			}
-		for (size_t fi = 0; fi < hull.f.size(); ++fi)
-			for (size_t j = 0; j < hull.f[fi].size(); ++j)
-				hull.f[fi][j] = remap[hull.f[fi][j]];
-		hull.v.swap(newV);
+		for (size_t fi = 0; fi < hf.size(); ++fi)
+			for (int j = 0; j < 3; ++j)
+				hf[fi][j] = remap[hf[fi][j]];
+		hv.swap(newV);
+	};
+
+	std::vector<int> order((size_t)n);
+	for (int i = 0; i < n; ++i)
+		order[i] = i;
+
+	std::vector<dvec3> hv;
+	std::vector<std::vector<int>> hf;
+	buildWithOrder(order, hv, hf);
+	if (!HullValid(hv, hf, scale))
+	{
+		// Retry with the reverse insertion order: near-coplanar micro-slivers are
+		// order-dependent, and a different order often builds a clean hull.
+		std::reverse(order.begin(), order.end());
+		std::vector<dvec3> hv2;
+		std::vector<std::vector<int>> hf2;
+		buildWithOrder(order, hv2, hf2);
+		if (HullValid(hv2, hf2, scale))
+		{
+			hv = std::move(hv2);
+			hf = std::move(hf2);
+		}
+		// If neither order validates, keep the first result (best effort); the
+		// OBB search has its own fallbacks for imperfect hulls.
 	}
 
+	// Convert back to float. The hull vertices are original input points, so
+	// this is exact.
+	hull.v.reserve(hv.size());
+	for (size_t i = 0; i < hv.size(); ++i)
+		hull.v.push_back(vec3((float)hv[i].x, (float)hv[i].y, (float)hv[i].z));
+	hull.f = std::move(hf);
 	return hull;
 }
 
