@@ -79,7 +79,7 @@ inline float Max3f(float a, float b, float c) { return Maxf(Maxf(a, b), c); }
 // Same semantics as MathGeoLib's EqualAbs(): |a - b| < epsilon (default 1e-4).
 inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return Absf(a - b) < epsilon; }
 
-float LengthSq(const vec3 &v) { return v.x*v.x + v.y*v.y + v.z*v.z; }
+float LengthSq(const vec3 &v) { return dot(v, v); }
 
 // Normalizes the vector in place, returns the original length.
 float Normalize(vec3 &v)
@@ -89,7 +89,7 @@ float Normalize(vec3 &v)
 	{
 		float len = (float)sqrt((double)lenSq);
 		float inv = 1.f / len;
-		v.x *= inv; v.y *= inv; v.z *= inv;
+		v *= inv;
 	}
 	return (float)sqrt((double)lenSq);
 }
@@ -1081,9 +1081,7 @@ void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 		minOBB->axis[0] = n1;
 		minOBB->axis[1] = n2;
 		minOBB->axis[2] = n3;
-		minOBB->r.x = (maxN1 - minN1) * 0.5f;
-		minOBB->r.y = (maxN2 - minN2) * 0.5f;
-		minOBB->r.z = (maxN3 - minN3) * 0.5f;
+		minOBB->r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
 		minOBB->pos = n1 * (minN1 + minOBB->r.x) + n2 * (minN2 + minOBB->r.y) + n3 * (minN3 + minOBB->r.z);
 		*minVolume = volume;
 	}
@@ -1412,9 +1410,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 						minOBB.axis[0] = n;
 						minOBB.axis[1] = n2;
 						minOBB.axis[2] = n3;
-						minOBB.r.x = (maxN1 - minN1) * 0.5f;
-						minOBB.r.y = (maxN2 - minN2) * 0.5f;
-						minOBB.r.z = (maxN3 - minN3) * 0.5f;
+						minOBB.r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
 						minVolume = volume;
 					}
 				}
@@ -1513,9 +1509,7 @@ OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 					minOBB.axis[0] = n1;
 					minOBB.axis[1] = n2;
 					minOBB.axis[2] = n3;
-					minOBB.r.x = (maxN1 - minN1) * 0.5f;
-					minOBB.r.y = (maxN2 - minN2) * 0.5f;
-					minOBB.r.z = (maxN3 - minN3) * 0.5f;
+					minOBB.r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
 					minVolume = volume;
 				}
 			}
