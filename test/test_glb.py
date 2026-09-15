@@ -49,13 +49,18 @@ def build_exe():
 
 
 def polyhedron_volume(vertices, faces):
-    """Exact volume of a closed triangulated polyhedron (divergence theorem)."""
+    """Exact volume of a closed polyhedron (divergence theorem).
+
+    Faces may be n-gons; each is fan-triangulated from its first vertex.
+    """
     vol = 0.0
     for f in faces:
-        a, b, c = vertices[f[0]], vertices[f[1]], vertices[f[2]]
-        vol += (a[0] * (b[1] * c[2] - b[2] * c[1])
-                - a[1] * (b[0] * c[2] - b[2] * c[0])
-                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+        a = vertices[f[0]]
+        for i in range(1, len(f) - 1):
+            b, c = vertices[f[i]], vertices[f[i + 1]]
+            vol += (a[0] * (b[1] * c[2] - b[2] * c[1])
+                    - a[1] * (b[0] * c[2] - b[2] * c[0])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0]))
     return abs(vol) / 6.0
 
 
