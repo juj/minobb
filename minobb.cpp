@@ -1,25 +1,3 @@
-// minobb.cpp
-//
-// Self-contained implementation of the minimum-volume OBB algorithm from
-// MathGeoLib's OBB::OptimalEnclosingOBB() (Jylanki 2015).
-//
-// The code is a port of the original with the following simplifications:
-//  - MathGeoLib's vec (float4/SSE) is replaced by a plain vec3 float struct.
-//  - The convex hull is computed by a simple O(n^2) incremental algorithm
-//    instead of MathGeoLib's QuickHull (the hull only needs to be correct, not fast).
-//  - The graph-search (flood fill) based extreme vertex / antipodal / sidepodal
-//    searches are replaced by exhaustive O(V) linear scans (see the NAIVE_ANTIPODAL_SEARCH
-//    and NAIVE_SIDEPODAL_SEARCH variants in the original OBB.cpp, which are
-//    documented to be equivalent). This makes the code much simpler at the cost
-//    of performance on large inputs.
-//  - Spatial traversal orders, search hints, timing instrumentation, logging
-//    and validity asserts from the original are removed.
-//
-// Everything else (the contact-configuration enumeration: categories A, B and C;
-// ComputeBasis; AreEdgesCompatibleForOBB; AreCompatibleOpposingEdges;
-// IsVertexAntipodalToEdge; the 2D planar fallback with rotating calipers)
-// follows the original code as closely as practical.
-
 #include "minobb.h"
 
 #include <vector>
@@ -28,6 +6,7 @@
 #include <cfloat>
 #include <cstring>
 #include <set>
+#include <assert.h>
 
 // ----------------------------------------------------------------------------
 // vec3 and OBB implementations
@@ -109,7 +88,7 @@ static vec3 Perpendicular(const vec3 &v)
 
 // Computes an orthonormal basis (outU, outV) perpendicular to this vector
 // (this vector must be normalized). Same semantics as MathGeoLib's
-// vec::PerpendicularBasis().
+// vec3::PerpendicularBasis().
 static void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
 {
 	outU = Normalized(Perpendicular(v));
@@ -366,6 +345,25 @@ static bool HullValid(const std::vector<dvec3> &v, const std::vector<std::vector
 		}
 	}
 	return true;
+}
+
+static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &hull)
+{
+	std::vector<std::vector<int> > adjacencyData;
+	adjacencyData.reserve(hull.v.size());
+	adjacencyData.insert(adjacencyData.end(), hull.v.size(), std::vector<int>());
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		const std::vector<int> &face = hull.f[i];
+		int v0 = face.back();
+		for(size_t j = 0; j < face.size(); ++j)
+		{
+			int v1 = face[j];
+			adjacencyData[v0].push_back(v1);
+			v0 = v1;
+		}
+	}
+	return adjacencyData;
 }
 
 static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
@@ -675,7 +673,7 @@ Hull3 convex_hull(float *pts, int num_pts, int stride_bytes)
 
 struct Edge
 {
-	int first, last;
+	int first, second;
 };
 
 
@@ -1214,6 +1212,34 @@ static bool IsVertexAntipodalToEdge(const std::vector<vec3> &v, int vi, const st
 	return true;
 }
 
+// A heuristic(?) that checks of the face normals of two edges are not suitably oriented.
+// This is used to skip certain configurations.
+static bool AreEdgesBad(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b)
+{
+	return false;
+	// Currently disabled. It's not completely certain if there's a form of this heuristic that
+	// might be perfect, needs more tweaking.
+#if 0 
+	float a1 = Abs(f1a.Dot(f1b));
+	float a2 = Abs(f2a.Dot(f2b));
+	float b1 = Abs(f1a.Dot(f2b));
+	float b2 = Abs(f2a.Dot(f1b));
+	const float limitEpsilon = 1e-4f;
+
+	if ((a1 > 1.f - limitEpsilon && a2 < limitEpsilon) || (a2 > 1.f - limitEpsilon && a1 < limitEpsilon))
+		return true;
+	if ((b1 > 1.f - limitEpsilon && b2 < limitEpsilon) || (b2 > 1.f - limitEpsilon && b1 < limitEpsilon))
+		return true;
+
+	if ((a1 > 1.f - limitEpsilon || a1 < limitEpsilon) && (a2 > 1.f - limitEpsilon || a2 < limitEpsilon))
+		return true;
+	if ((b1 > 1.f - limitEpsilon || b1 < limitEpsilon) && (b2 > 1.f - limitEpsilon || b2 < limitEpsilon))
+		return true;
+
+	return false;
+#endif
+}
+
 // Port of TestThreeAdjacentFaces().
 static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 	int edgeI, int edgeJ, int edgeK,
@@ -1253,22 +1279,73 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 	}
 }
 
+int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, 
+	std::vector<unsigned int> &floodFillVisited, unsigned int floodFillVisitColor,
+	float &mostExtremeDistance, int startingVertex)
+{
+#ifdef MATH_NUMSTEPS_STATS
+	numSearchStepsDone = 0;
+	numImprovementsMade = 0;
+#endif
+	float curD = dot(direction, hull.v[startingVertex]);
+	const int *neighbors = &adjacencyData[startingVertex][0];
+	const int *neighborsEnd = neighbors + adjacencyData[startingVertex].size();
+	floodFillVisited[startingVertex] = floodFillVisitColor;
+
+	int secondBest = -1;
+	float secondBestD = curD - 1e-3f;
+	while(neighbors != neighborsEnd)
+	{
+		int n = *neighbors++;
+		if (floodFillVisited[n] != floodFillVisitColor)
+		{
+			float d = dot(direction, hull.v[n]);
+			if (d > curD)
+			{
+				startingVertex = n;
+				curD = d;
+				floodFillVisited[startingVertex] = floodFillVisitColor;
+				neighbors = &adjacencyData[startingVertex][0];
+				neighborsEnd = neighbors + adjacencyData[startingVertex].size();
+				secondBest = -1;
+				secondBestD = curD - 1e-3f;
+			}
+			else if (d > secondBestD)
+			{
+				secondBest = n;
+				secondBestD = d;
+			}
+		}
+	}
+	if (secondBest != -1 && floodFillVisited[secondBest] != floodFillVisitColor)
+	{
+		float secondMostExtreme = -FLT_MAX;
+		int secondTry = ExtremeVertexConvex(hull, adjacencyData, direction, floodFillVisited, floodFillVisitColor, secondMostExtreme, secondBest);
+		if (secondMostExtreme > curD)
+		{
+			mostExtremeDistance = secondMostExtreme;
+			return secondTry;
+		}
+	}
+	mostExtremeDistance = curD;
+	return startingVertex;
+}
+
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
 static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 {
-	/* Outline of the algorithm (from the original):
-	  0. Compute the convex hull of the point set (done by the caller)
-	  1. Compute vertex adjacency data.
-	  2. Precompute face normal direction vectors.
-	  3. Compute edge adjacency data (the two faces sharing each edge).
-	  4. Precompute antipodal vertices for each edge.
-	  5. Precompute all sidepodal (compatible) edges for each edge.
-	  6. Test all configurations where all three edges are on adjacent faces.
-	  7. Test all configurations where two edges are on opposing faces, and the third
-	     one is on a face adjacent to the two.
-	  8. Test all configurations where two edges are on the same face (OBB aligns with
-	     a face of the convex hull).
+	/* Outline of the algorithm:
+	  0. Compute the convex hull of the point set (given as input to this function) O(VlogV)
+	  1. Compute vertex adjacency data, i.e. given a vertex, return a list of its neighboring vertices. O(V)
+	  2. Precompute face normal direction vectors, since these are needed often. (does not affect big-O complexity, just a micro-opt) O(F)
+	  3. Compute edge adjacency data, i.e. given an edge, return the two indices of its neighboring faces. O(V)
+	  4. Precompute antipodal vertices for each edge. O(A*ElogV), where A is the size of antipodal vertices per edge. A ~ O(1) on average.
+	  5. Precompute all sidepodal edges for each edge. O(E*S), where S is the size of sidepodal edges per edge. S ~ O(sqrtE) on average.
+	     - Sort the sidepodal edges to a linear order so that it's possible to do fast set intersection computations on them. O(E*S*logS), or O(E*sqrtE*logE).
+	  6. Test all configurations where all three edges are on adjacent faces. O(E*S^2) = O(E^2) or if smart with graph search, O(ES) = O(E*sqrtE)?
+	  7. Test all configurations where two edges are on opposing faces, and the third one is on a face adjacent to the two. O(E*sqrtE*logV)?
+	  8. Test all configurations where two edges are on the same face (OBB aligns with a face of the convex hull). O(F*sqrtE*logV).
 	  9. Return the best found OBB.
 	*/
 
@@ -1277,43 +1354,46 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	float minVolume = FLT_MAX;
 
 	// Handle degenerate planar cases up front.
-	if (hull.v.size() <= 3 || hull.f.empty())
+	if (hull.v.size() <= 3 || hull.f.size() <= 1)
 		return minOBB;
+
+	// Precomputation: for each vertex in the convex hull, compute their neighboring vertices.
+	std::vector<std::vector<int> > adjacencyData = GenerateVertexAdjacencyData(hull); // O(V)
 
 	const std::vector<vec3> &vtx = hull.v;
 	const int V = (int)vtx.size();
 	const int F = (int)hull.f.size();
 
-	// Precomputation: for each vertex in the convex hull, compute their neighboring vertices.
-	std::vector<std::vector<int>> adjacencyData(V);
-
-	// Precomputation: compute normalized face direction vectors for each face of the hull.
+	// Precomputation: Compute normalized face direction vectors for each face of the hull.
 	std::vector<vec3> faceNormals(F);
-	for (int i = 0; i < F; ++i)
+	for(int i = 0; i < F; ++i) // O(F)
 	{
-		if (hull.f[i].size() < 3)
-			return minOBB; // Degenerate face, cannot process.
-		faceNormals[i] = Normalized(cross(vtx[hull.f[i][1]] - vtx[hull.f[i][0]],
-		                                       vtx[hull.f[i][2]] - vtx[hull.f[i][0]]));
+		if (hull.f[i].size() < 3) return minOBB; // Degenerate face, cannot process.
+		faceNormals[i] = Normalized(cross(vtx[hull.f[i][1]] - vtx[hull.f[i][0]], vtx[hull.f[i][2]] - vtx[hull.f[i][0]]));
 	}
 
 	// For each edge i, specifies the two vertices v0 and v1 through which that edge goes.
+	// This array does not have duplicates, i.e. there only exists one edge index for (v0->v1), and no
+	// edge for (v1->v0).
 	std::vector<Edge> edges;
 	edges.reserve(V * 2);
-	// For each edge i, specifies the face indices f0 and f1 that share that edge.
+	// For each edge i, specifies the two face indices f0 and f1 that share that edge.
 	std::vector<std::pair<int, int>> facesForEdge;
 	facesForEdge.reserve(V * 2);
-	// For each vertex pair (v0, v1) through which there is an edge, specifies the index i of the edge.
-	// O(V^2) array data structure (same as the original).
-	const int EMPTY_EDGE = -1;
-	std::vector<int> vertexPairsToEdges((size_t)V * V, EMPTY_EDGE);
+	// For each vertex pair (v0, v1) through which there is an edge, specifies the index i of the edge that passes through them.
+	// This map contains duplicates, so both (v0, v1) and (v1, v0) map to the same edge index.
+	// Currently use a O(V^2) array for this data structure for performance.
+	unsigned int *vertexPairsToEdges = new unsigned int[hull.v.size()*hull.v.size()];
+	memset(vertexPairsToEdges, 0xFF, sizeof(unsigned int)*hull.v.size()*hull.v.size());
+#define EMPTY_EDGE 0xFFFFFFFFU
 
 	// Precomputation: for each edge through vertices (i,j), we need to know
 	// the face indices for the two adjoining faces that share the edge.
+	// This is O(V).
 	for (int fi = 0; fi < F; ++fi)
 	{
 		const std::vector<int> &face = hull.f[fi];
-		int v0 = face[face.size() - 1];
+		int v0 = face.back();
 		for (size_t j = 0; j < face.size(); ++j)
 		{
 			int v1 = face[j];
@@ -1329,7 +1409,11 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			v0 = v1;
 		}
 	}
+
+	// Throughout the algorithm, internal edges can all be discarded, so provide a helper macro to test for that.
+#define IS_INTERNAL_EDGE(i) (dot(faceNormals[facesForEdge[i].first], faceNormals[facesForEdge[i].second]) > 1.f - 1e-4f)
 	const int E = (int)edges.size();
+/*
 	for (int i = 0; i < V; ++i)
 		for (int j = i + 1; j < V; ++j)
 			if (vertexPairsToEdges[i * V + j] != EMPTY_EDGE)
@@ -1348,13 +1432,84 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			return true; // Should not happen for a closed hull.
 		return dot(faceNormals[ff.first], faceNormals[ff.second]) > 1.f - 1e-4f;
 	};
+*/
+
+	// Throughout the whole algorithm, this array stores an auxiliary structure for performing graph searches
+	// on the vertices of the convex hull. Conceptually each index of the array stores a boolean whether we
+	// have visited that vertex or not during the current search. However storing such booleans is slow, since
+	// we would have to perform a linear-time scan through this array before next search to reset each boolean
+	// to unvisited false state. Instead, store a number, called a "color" for each vertex to specify whether
+	// that vertex has been visited, and manage a global color counter floodFillVisitColor that represents the
+	// visited vertices. At any given time, the vertices that have already been visited have the value
+	// floodFillVisited[i] == floodFillVisitColor in them. This gives a win that we can perform constant-time
+	// clears of the floodFillVisited array, by simply incrementing the "color" counter to clear the array.
+	std::vector<unsigned int> floodFillVisited(hull.v.size());
+	unsigned int floodFillVisitColor = 1;
+
+	// As a syntactic aid, use the helpers MARK_VISITED(v), HAVE_VISITED_VERTEX(v) and CLEAR_GRAPH_SEARCH to
+	// remind of the conceptual meaning of these values.
+#define MARK_VERTEX_VISITED(v) (floodFillVisited[(v)] = floodFillVisitColor)
+#define HAVE_VISITED_VERTEX(v) (floodFillVisited[(v)] == floodFillVisitColor) // HAVE_VISITED_VERTEX(v) implies HAVE_QUEUED_VERTEX(v)
+#define CLEAR_GRAPH_SEARCH() (++floodFillVisitColor)
 
 	// Stores for each edge index i the complete list of antipodal vertices for that edge.
-	std::vector<std::vector<int>> antipodalPointsForEdge(E);
-	// Naive O(E*V) search (a superset of the original's graph search, see
-	// NAIVE_ANTIPODAL_SEARCH in OBB.cpp). Supersets are safe: the lists are only
-	// used to search for the minimum along an axis, and extra (non-extreme)
-	// candidates can never lower that minimum below the true hull minimum.
+	std::vector<std::vector<int> > antipodalPointsForEdge(E);
+
+	// The currently best variant for establishing a spatially coherent traversal order.
+	std::vector<int> spatialFaceOrder;
+	std::vector<int> spatialEdgeOrder;
+	srand(123); // TODO: mini RNG
+//	LCG rng(123);
+	{ // Explicit scope for variables that are not needed after this.
+		std::vector<std::pair<int, int> > traverseStackEdges;
+		std::vector<unsigned int> visitedEdges(edges.size());
+		std::vector<unsigned int> visitedFaces(hull.f.size());
+		traverseStackEdges.push_back(std::make_pair(0, adjacencyData[0].front()));
+		while(!traverseStackEdges.empty())
+		{
+			std::pair<int, int> e = traverseStackEdges.back();
+			traverseStackEdges.pop_back();
+			int thisEdge = vertexPairsToEdges[e.first*hull.v.size()+e.second];
+			if (visitedEdges[thisEdge])
+				continue;
+			visitedEdges[thisEdge] = 1;
+			if (!visitedFaces[facesForEdge[thisEdge].first])
+			{
+				visitedFaces[facesForEdge[thisEdge].first] = 1;
+				spatialFaceOrder.push_back(facesForEdge[thisEdge].first);
+			}
+			if (!visitedFaces[facesForEdge[thisEdge].second])
+			{
+				visitedFaces[facesForEdge[thisEdge].second] = 1;
+				spatialFaceOrder.push_back(facesForEdge[thisEdge].second);
+			}
+			if (!IS_INTERNAL_EDGE(thisEdge))
+				spatialEdgeOrder.push_back(thisEdge);
+			int v0 = e.second;
+			size_t sizeBefore = traverseStackEdges.size();
+			for(size_t i = 0; i < adjacencyData[v0].size(); ++i)
+			{
+				int v1 = adjacencyData[v0][i];
+				int e1 = vertexPairsToEdges[v0*hull.v.size()+v1];
+				if (visitedEdges[e1])
+					continue;
+				traverseStackEdges.push_back(std::make_pair(v0, v1));
+			}
+			// Take a random adjacent edge.
+			int nNewEdges = (int)(traverseStackEdges.size() - sizeBefore);
+			if (nNewEdges > 0)
+			{
+				int r = nNewEdges > 1 ? (rand() % (nNewEdges - 1)) : 0;
+				std::swap(traverseStackEdges.back(), traverseStackEdges[sizeBefore+r]);
+			}
+		}
+	}
+
+	// Stores a memory of yet unvisited vertices for current graph search.
+	std::vector<int> traverseStack;
+
+#ifdef NAIVE_ANTIPODAL_SEARCH
+	// A naive O(E*V) algorithm for computing all antipodal points for each edge.
 	for (int i = 0; i < E; ++i)
 	{
 		// Skip internal (numerically coplanar) edges: when f1a == f1b the
@@ -1370,7 +1525,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		for (int j = 0; j < V; ++j)
 			if (IsVertexAntipodalToEdge(vtx, j, adjacencyData[j], f1a, f1b))
 			{
-				if (edges[i].first == j || edges[i].last == j)
+				if (edges[i].first == j || edges[i].second == j)
 				{
 					// Edge is antipodal to a vertex of the same edge. This should be
 					// possible only if the input is degenerate planar. Return an
@@ -1381,15 +1536,96 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				antipodalPointsForEdge[i].push_back(j);
 			}
 	}
+#endif
+
+	// Since we do several extreme vertex searches, and the search directions have a lot of spatial locality,
+	// always start the search for the next extreme vertex from the extreme vertex that was found during the
+	// previous iteration for the previous edge. This has been profiled to improve overall performance by as
+	// much as 15-25%.
+	int startingVertex = 0;
+
+#ifndef NAIVE_ANTIPODAL_SEARCH
+
+	// Precomputation: for each edge, we need to compute the list of potential antipodal points (points on
+	// the opposing face of an enclosing OBB of the face that is flush with the given edge of the polyhedron).
+	// This is O(E*log(V)) ?
+	//for (size_t i = 0; i < edges.size(); ++i) // O(E)
+	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+	{
+		size_t i = (size_t)spatialEdgeOrder[ii];
+		vec3 f1a = faceNormals[facesForEdge[i].first];
+		vec3 f1b = faceNormals[facesForEdge[i].second];
+
+		float dummy;
+		CLEAR_GRAPH_SEARCH(); // ExtremeVertexConvex performs a graph search, initialize the search data structure for it.
+		startingVertex = ExtremeVertexConvex(hull, adjacencyData, -f1a, floodFillVisited, floodFillVisitColor, dummy, startingVertex); // O(log(V)?
+		CLEAR_GRAPH_SEARCH(); // Search through the graph for all adjacent antipodal vertices.
+		traverseStack.push_back(startingVertex);
+		MARK_VERTEX_VISITED(startingVertex);
+		while(!traverseStack.empty()) // In amortized analysis, only a constant number of vertices are antipodal points for any edge?
+		{
+			int v = traverseStack.back();
+			traverseStack.pop_back();
+			const std::vector<int> &neighbors = adjacencyData[v];
+			if (IsVertexAntipodalToEdge(hull.v, v, neighbors, f1a, f1b))
+			{
+				if (edges[i].first == v || edges[i].second == v)
+				{
+					/* 
+					LOGE("Edge %d: %d->%d is antipodal to vertex %d, which is part of the same edge! This should be possible only if the input is degenerate planar!",
+						(int)i, edges[i].first, edges[i].second, v);
+					*/
+					delete[] vertexPairsToEdges;
+					// Input set is degenerate planar. Return an invalid OBB.
+					OBB degenerateObb;
+					degenerateObb.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX); // Degenerate marker.
+					return degenerateObb;
+
+					// We could automatically compute a planar box here, but in order to be able to do that robustly,
+					// one should definitely compute the planar box on the source input set, and not on a convex hull
+					// computed from that input set. So it is possible that this computed box from convexHull will
+					// be bad due to float imprecision. Instead, caller should call SmallestOBBVolume2DPlanar() on
+					// the source point set if they want to get a flat OBB from the input point set.
+					/////return SmallestOBBVolume2DPlanar((const vec3*)&hull.v[0], (int)hull.v.size());
+				}
+				antipodalPointsForEdge[i].push_back(v);
+				for(size_t j = 0; j < neighbors.size(); ++j)
+					if (!HAVE_VISITED_VERTEX(neighbors[j]))
+					{
+						traverseStack.push_back(neighbors[j]);
+						MARK_VERTEX_VISITED(neighbors[j]);
+					}
+			}
+		}
+		// Robustness: If the above search did not find any antipodal points, add the first found extreme
+		// point at least, since it is always an antipodal point. This is known to occur very rarely due
+		// to numerical imprecision in the above loop over adjacent edges.
+		if (antipodalPointsForEdge[i].empty())
+		{
+//			LOGW("Due to numerical stability issues(?), could not find an antipodal vertex for edge %d! Check the scale of your input dataset! Good scale is having coordinates range e.g. [0.0,100.0]", edges[i]);
+			// Getting here is most likely a bug. Fall back to linear scan, which is very slow.
+			for(size_t j = 0; j < hull.v.size(); ++j) // O(V)
+				if (IsVertexAntipodalToEdge(hull.v, (int)j, adjacencyData[j], f1a, f1b))
+					antipodalPointsForEdge[i].push_back((int)j);
+
+//			antipodalPointsForEdge[i].push_back(startingVertex);
+		}
+	}
+#endif
 
 	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with.
 	std::vector<std::vector<int>> compatibleEdges(E);
+
 	// Use an O(E*V) data structure for sidepodal vertices.
 	std::vector<unsigned char> sidepodalVertices((size_t)E * V, 0);
 
-	// Naive O(E^2) search (equivalent to the original's graph search, see
-	// NAIVE_SIDEPODAL_SEARCH in OBB.cpp).
-	// Important! An edge can be its own companion edge!
+// Enable this to perform a dumb search for sidepodal edges. Makes sense mostly for debugging the behavior of the smarter version.
+//#define NAIVE_SIDEPODAL_SEARCH
+
+#ifdef NAIVE_SIDEPODAL_SEARCH
+	// Precomputation: Compute all potential companion edges for each edge.
+	// This is O(E^2)
+	// Important! And edge can be its own companion edge! So have each edge test itself during iteration.
 	for (int i = 0; i < E; ++i)
 	{
 		vec3 f1a = faceNormals[facesForEdge[i].first];
@@ -1401,71 +1637,248 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			if (!isInternalEdge(i))
 				compatibleEdges[i].push_back(j);
 			sidepodalVertices[i * V + edges[j].first] = 1;
-			sidepodalVertices[i * V + edges[j].last] = 1;
+			sidepodalVertices[i * V + edges[j].second] = 1;
 			if (i != j)
 			{
 				if (!isInternalEdge(j))
 					compatibleEdges[j].push_back(i);
 				sidepodalVertices[j * V + edges[i].first] = 1;
-				sidepodalVertices[j * V + edges[i].last] = 1;
+				sidepodalVertices[j * V + edges[i].second] = 1;
 			}
 		}
 	}
-
-	// ----------------------------------------------------------------------------
-	// Category A: Test all configurations where all three edges are on adjacent faces.
-	// (Naive complete enumeration: all index triples i < j < k where k is sidepodal to
-	// both i and j. The original restricts this with spatial orders + graph search,
-	// which only skips work, never candidates.)
-	// ----------------------------------------------------------------------------
-	for (int i = 0; i < E; ++i)
+#else
+	// Compute all sidepodal edges for each edge by performing a graph search. The set of sidepodal edges is
+	// connected in the graph, which lets us avoid having to iterate over each edge pair of the convex hull.
+	// Total running time is O(E*sqrtE).
+//	for(size_t i = 0; i < edges.size(); ++i) // O(E)
+	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
-		if (isInternalEdge(i))
-			continue;
+		size_t i = (size_t)spatialEdgeOrder[ii];
 		vec3 f1a = faceNormals[facesForEdge[i].first];
 		vec3 f1b = faceNormals[facesForEdge[i].second];
-		for (size_t j = 0; j < compatibleEdges[i].size(); ++j)
+
+		vec3 deadDirection = (f1a+f1b)*0.5f;
+		vec3 basis1, basis2;
+		PerpendicularBasis(deadDirection, basis1, basis2);
+
+		float dummy;
+		vec3 dir = Perpendicular(f1a);
+		CLEAR_GRAPH_SEARCH();
+		startingVertex = ExtremeVertexConvex(hull, adjacencyData, dir, floodFillVisited, floodFillVisitColor, dummy, startingVertex); // O(log|V|)
+		CLEAR_GRAPH_SEARCH();
+		traverseStack.push_back(startingVertex);
+		while(!traverseStack.empty()) // O(sqrt(E))
 		{
-			int edgeJ = compatibleEdges[i][j];
-			if (edgeJ <= i)
-				continue; // Remove symmetry.
-			if (isInternalEdge(edgeJ))
+			int v = traverseStack.back();
+			traverseStack.pop_back();
+			if (HAVE_VISITED_VERTEX(v))
 				continue;
+			MARK_VERTEX_VISITED(v);
+
+			const std::vector<int> &n = adjacencyData[v];
+			for(size_t j = 0; j < n.size(); ++j)
+			{
+				int vAdj = n[j];
+				if (HAVE_VISITED_VERTEX(vAdj))
+					continue;
+
+//				int edge = vertexPairsToEdges[std::make_pair(v, vAdj)];
+				int edge = vertexPairsToEdges[v*hull.v.size()+vAdj];
+//				if (IS_INTERNAL_EDGE(edge))
+//					continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
+				if (AreEdgesCompatibleForOBB(f1a, f1b, faceNormals[facesForEdge[edge].first], faceNormals[facesForEdge[edge].second]))
+				{
+					if ((int)i <= edge)
+					{
+						if (!IS_INTERNAL_EDGE(edge))
+							compatibleEdges[i].push_back(edge);
+
+						sidepodalVertices[i*hull.v.size()+edges[edge].first] = 1;
+						sidepodalVertices[i*hull.v.size()+edges[edge].second] = 1;
+
+//						sidepodalVertices[i].insert(edges[edge].first);
+//						sidepodalVertices[i].insert(edges[edge].second);
+						if ((int)i != edge)
+						{
+//							vec3 f2a = faceNormals[facesForEdge[edge].first];
+//							vec3 f2b = faceNormals[facesForEdge[edge].second];
+
+							if (!IS_INTERNAL_EDGE(edge))
+								compatibleEdges[edge].push_back((int)i);
+//							sidepodalVertices[edge].insert(edges[i].first);
+//							sidepodalVertices[edge].insert(edges[i].second);
+							sidepodalVertices[edge*hull.v.size()+edges[i].first] = 1;
+							sidepodalVertices[edge*hull.v.size()+edges[i].second] = 1;
+//							sidepodalVerticesForEdge[edge].push_back(edges[i].first);
+//							sidepodalVerticesForEdge[edge].push_back(edges[i].second);
+//							++numSmallerCompatibleEdgeIndices[edge];
+						}
+					}
+					traverseStack.push_back(vAdj);
+				}
+			}
+		}
+	}
+#endif
+
+	// Take advantage of spatial locality: start the search for the extreme vertex from the extreme vertex
+	// that was found during the previous iteration for the previous edge. This speeds up the search since
+	// edge directions have some amount of spatial locality and the next extreme vertex is often close
+	// to the previous one. Track two hint variables since we are performing extreme vertex searches to
+	// two opposing directions at the same time.
+	int extremeVertexSearchHint1 = 0;
+	int extremeVertexSearchHint2 = 0;
+	int extremeVertexSearchHint3 = 0;
+	int extremeVertexSearchHint4 = 0;
+	int extremeVertexSearchHint1_b = 0;
+	int extremeVertexSearchHint2_b = 0;
+	int extremeVertexSearchHint3_b = 0;
+
+	// Stores a memory of yet unvisited vertices that are common sidepodal vertices to both currently chosen edges for current graph search.
+	std::vector<int> traverseStackCommonSidepodals;
+
+//	for(size_t i = 0; i < edges.size(); ++i) // O(|E|)
+	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+	{
+		size_t i = (size_t)spatialEdgeOrder[ii];
+		vec3 f1a = faceNormals[facesForEdge[i].first];
+		vec3 f1b = faceNormals[facesForEdge[i].second];
+
+		vec3 deadDirection = (f1a+f1b)*0.5f;
+
+//		vec3 e1 = (vec3(hull.v[edges[i].first]) - vec3(hull.v[edges[i].second])).Normalized();
+
+		const std::vector<int> &compatibleEdgesI = compatibleEdges[i];
+
+		for(size_t j = 0; j < compatibleEdgesI.size(); ++j) // O(sqrt(|E|))?
+		{
+			int edgeJ = compatibleEdgesI[j];
+			if (edgeJ <= (int)i) continue; // Remove symmetry.
 			vec3 f2a = faceNormals[facesForEdge[edgeJ].first];
 			vec3 f2b = faceNormals[facesForEdge[edgeJ].second];
-			for (int edgeK = edgeJ + 1; edgeK < E; ++edgeK)
-			{
-				if (isInternalEdge(edgeK))
-					continue;
-				if (!sidepodalVertices[i * V + edges[edgeK].first]
-					|| !sidepodalVertices[i * V + edges[edgeK].last])
-					continue;
-				if (!sidepodalVertices[edgeJ * V + edges[edgeK].first]
-					|| !sidepodalVertices[edgeJ * V + edges[edgeK].last])
-					continue;
-				vec3 f3a = faceNormals[facesForEdge[edgeK].first];
-				vec3 f3b = faceNormals[facesForEdge[edgeK].second];
+			if (AreEdgesBad(f1a, f1b, f2a, f2b)) continue;
 
-				vec3 n1[2], n2[2], n3[2];
-				int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
-				for (int s = 0; s < nSolutions; ++s)
-					TestThreeAdjacentFaces(n1[s], n2[s], n3[s], i, edgeJ, edgeK,
-						vtx, edges, antipodalPointsForEdge, &minVolume, &minOBB);
+			vec3 deadDirection2 = (f2a+f2b)*0.5f;
+
+			vec3 searchDir = cross(deadDirection, deadDirection2);
+			float len = Normalize(searchDir);
+			if (len == 0.f)
+			{
+				searchDir = cross(f1a, f2a);
+				len = Normalize(searchDir);
+				if (len == 0.f)
+					searchDir = Perpendicular(f1a);
+			}
+
+			CLEAR_GRAPH_SEARCH();
+			float dummy;
+			extremeVertexSearchHint1 = ExtremeVertexConvex(hull, adjacencyData, searchDir, floodFillVisited, floodFillVisitColor, dummy, extremeVertexSearchHint1); // O(log|V|)?
+			CLEAR_GRAPH_SEARCH();
+			extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -searchDir, floodFillVisited, floodFillVisitColor, dummy, extremeVertexSearchHint2); // O(log|V|)?
+
+// Enable new smarter search for sidepodal vertices. Should be always on.
+#define SECOND_GUESS_SIDEPODALS
+
+			int secondSearch = -1;
+#ifdef SECOND_GUESS_SIDEPODALS
+			if (sidepodalVertices[edgeJ*hull.v.size()+extremeVertexSearchHint1]) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
+			else traverseStack.push_back(extremeVertexSearchHint1);
+			if (sidepodalVertices[edgeJ*hull.v.size()+extremeVertexSearchHint2]) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
+			else secondSearch = extremeVertexSearchHint2;//traverseStack.push_back(extremeVertexSearchHint2);
+#else
+			traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
+			traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
+#endif
+
+			// Bootstrap to a good vertex that is sidepodal to both edges.
+			CLEAR_GRAPH_SEARCH();
+			while(!traverseStack.empty())
+			{
+				int v = traverseStack.front();
+				traverseStack.erase(traverseStack.begin());
+				if (HAVE_VISITED_VERTEX(v))
+					continue;
+				MARK_VERTEX_VISITED(v);
+				const std::vector<int> &n = adjacencyData[v];
+				for(size_t k = 0; k < n.size(); ++k)
+				{
+					int vAdj = n[k];
+					if (!HAVE_VISITED_VERTEX(vAdj) && sidepodalVertices[i*hull.v.size()+vAdj])
+					{
+						if (sidepodalVertices[edgeJ*hull.v.size()+vAdj])
+						{
+							traverseStack.clear();
+							if (secondSearch != -1)
+							{
+								traverseStack.push_back(secondSearch);
+								secondSearch = -1;
+								MARK_VERTEX_VISITED(vAdj);
+							}
+							traverseStackCommonSidepodals.push_back(vAdj);
+							break;
+						}
+						else
+							traverseStack.push_back(vAdj);
+					}
+				}
+			}
+
+			CLEAR_GRAPH_SEARCH();
+			while(!traverseStackCommonSidepodals.empty())
+			{
+				int v = traverseStackCommonSidepodals.back();
+				traverseStackCommonSidepodals.pop_back();
+				if (HAVE_VISITED_VERTEX(v))
+					continue;
+				MARK_VERTEX_VISITED(v);
+				const std::vector<int> &n = adjacencyData[v];
+				for(size_t k = 0; k < n.size(); ++k)
+				{
+					int vAdj = n[k];
+//					int edgeK = vertexPairsToEdges[std::make_pair(v, vAdj)];
+					int edgeK = vertexPairsToEdges[v*hull.v.size()+vAdj];
+					if (IS_INTERNAL_EDGE(edgeK))
+						continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
+					if (sidepodalVertices[i*hull.v.size()+vAdj]
+						&& sidepodalVertices[edgeJ*hull.v.size()+vAdj])
+					{
+						if (!HAVE_VISITED_VERTEX(vAdj))
+							traverseStackCommonSidepodals.push_back(vAdj);
+
+						if (edgeJ < edgeK)
+						{
+							// Test edge triplet i, edgeJ, edgeK.
+							vec3 f3a = faceNormals[facesForEdge[edgeK].first];
+							vec3 f3b = faceNormals[facesForEdge[edgeK].second];
+
+							if (!AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
+							{
+								vec3 n1[2], n2[2], n3[2];
+								int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
+								for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
+								{
+									TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
+										edges, antipodalPointsForEdge, &minVolume, &minOBB);
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 	}
 
-	// ----------------------------------------------------------------------------
-	// Category B: Test all configurations where two edges are on opposing faces, and
-	// the third one is on a face adjacent to the two.
-	// ----------------------------------------------------------------------------
 	std::vector<int> antipodalEdges;
 	std::vector<vec3> antipodalEdgeNormals;
 
-	for (int i = 0; i < E; ++i)
+	// Main algorithm body for finding all search directions where the OBB is flush with the edges of the
+	// convex hull from two opposing faces. This is O(E*sqrtE*logV)?
+//	for (size_t i = 0; i < edges.size(); ++i) // O(E)
+///	{
+	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
-		if (isInternalEdge(i))
-			continue;
+		size_t i = (size_t)spatialEdgeOrder[ii];
 		vec3 f1a = faceNormals[facesForEdge[i].first];
 		vec3 f1b = faceNormals[facesForEdge[i].second];
 
@@ -1473,21 +1886,22 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		antipodalEdgeNormals.clear();
 
 		const std::vector<int> &antipodals = antipodalPointsForEdge[i];
-		for (size_t j = 0; j < antipodals.size(); ++j)
+		for(size_t j = 0; j < antipodals.size(); ++j) // O(constant)?
 		{
 			int antipodalVertex = antipodals[j];
 			const std::vector<int> &adjacents = adjacencyData[antipodalVertex];
-			for (size_t k = 0; k < adjacents.size(); ++k)
+			for(size_t k = 0; k < adjacents.size(); ++k) // O(constant)?
 			{
 				int vAdj = adjacents[k];
 				if (vAdj < antipodalVertex)
-					continue; // Canonical order to be antipodalVertex < vAdj.
+					continue; // We search unordered edges, so no need to process edge (v1, v2) and (v2, v1) twice - take the canonical order to be antipodalVertex < vAdj
 
-				int edge = vertexPairsToEdges[antipodalVertex * V + vAdj];
-				if (edge == EMPTY_EDGE || i > edge)
-					continue; // Canonical order to be i < edge.
-				if (isInternalEdge(edge))
+//				int edge = vertexPairsToEdges[std::make_pair(antipodalVertex, vAdj)];
+				int edge = vertexPairsToEdges[antipodalVertex*hull.v.size()+vAdj];
+				if ((int)i > edge) // We search pairs of edges, so no need to process twice - take the canonical order to be i < edge.
 					continue;
+				if (IS_INTERNAL_EDGE(edge))
+					continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
 
 				vec3 f2a = faceNormals[facesForEdge[edge].first];
 				vec3 f2b = faceNormals[facesForEdge[edge].second];
@@ -1503,24 +1917,27 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 
 		const std::vector<int> &compatibleEdgesI = compatibleEdges[i];
-		for (size_t j = 0; j < compatibleEdgesI.size(); ++j)
+		for(size_t j = 0; j < compatibleEdgesI.size(); ++j)
+//		for(size_t j = 0; j < antipodalEdges.size(); ++j)
 		{
 			int edgeJ = compatibleEdgesI[j];
-			for (size_t k = 0; k < antipodalEdges.size(); ++k)
+//			const std::vector<int> &compatibleEdgesJ = compatibleEdges[edge];
+//			n = n.Normalized();
+			for(size_t k = 0; k < antipodalEdges.size(); ++k)
 			{
 				int edgeK = antipodalEdges[k];
 
 				vec3 n = antipodalEdgeNormals[k];
-				float minN1 = dot(n, vtx[edges[edgeK].first]);
-				float maxN1 = dot(n, vtx[edges[i].first]);
+				float minN1 = dot(n, hull.v[edges[edgeK].first]);
+				float maxN1 = dot(n, hull.v[edges[i].first]);
 
 				// Test all mutual compatible edges.
 				vec3 f3a = faceNormals[facesForEdge[edgeJ].first];
 				vec3 f3b = faceNormals[facesForEdge[edgeJ].second];
-
 				// Is edge3 compatible with direction n?
 				// n3 = f3b + (f3a-f3b)*v
 				// n1.n3 = 0
+				// n1.(f3b + (f3a-f3b)*v) = 0
 				// n1.f3b + n1.((f3a-f3b)*v) = 0
 				// n1.f3b = (n1.(f3b-f3a))*v
 				// If n1.(f3b-f3a) != 0:
@@ -1528,55 +1945,65 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				// If n1.(f3b-f3a) == 0:
 				//    n1.f3b must be zero as well, then arbitrary v is ok.
 				float num = dot(n, f3b);
-				float denom = dot(n, f3b - f3a);
+				float denom = dot(n, f3b-f3a);
 				MoveSign(num, denom);
 
 				const float epsilon = 1e-4f;
-				if (denom < epsilon)
+				if (denom < epsilon)//EqualAbs(denom, 0.f))
 				{
 					num = EqualAbs(num, 0.f) ? 0.f : -1.f;
 					denom = 1.f;
 				}
 
+//				if (v >= 0.f - epsilon && v <= 1.f + epsilon)
 				if (num >= denom * -epsilon && num <= denom * (1.f + epsilon))
 				{
 					float v = num / denom;
 					vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
 					vec3 n2 = Normalized(cross(n3, n));
 
-					// Linear scans for the extremes along n2 (replacing the original's
-					// graph searches ExtremeVertexConvex(adjacencyData, +/-n2)).
-					float minN2 = FLT_MAX, maxN2 = -FLT_MAX;
-					for (int a = 0; a < V; ++a)
-					{
-						float d = dot(n2, vtx[a]);
-						if (d < minN2) minN2 = d;
-						if (d > maxN2) maxN2 = d;
-					}
+					float minN2, maxN2;
 
-					float maxN3 = dot(n3, vtx[edges[edgeJ].first]);
+					CLEAR_GRAPH_SEARCH();
+					int hint = ExtremeVertexConvex(hull, adjacencyData, n2, floodFillVisited, floodFillVisitColor, maxN2, (k == 0) ? extremeVertexSearchHint1 : extremeVertexSearchHint1_b); // O(logV)?
+					if (k == 0) extremeVertexSearchHint1 = extremeVertexSearchHint1_b = hint;
+					else extremeVertexSearchHint1_b = hint;
+
+					CLEAR_GRAPH_SEARCH();
+					hint = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, (k == 0) ? extremeVertexSearchHint2 : extremeVertexSearchHint2_b); // O(logV)?
+					if (k == 0) extremeVertexSearchHint2 = extremeVertexSearchHint2_b = hint;
+					else extremeVertexSearchHint2_b = hint;
+					minN2 = -minN2;
+
+					float maxN3 = dot(n3, hull.v[edges[edgeJ].first]);
 
 					float minN3 = FLT_MAX;
 					const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edgeJ];
-					if (antipodalsEdge3.empty())
+					if (antipodalsEdge3.size() < 20) // If there are very few antipodal vertices, do a very tight loop and just iterate over each.
 					{
-						for (int a = 0; a < V; ++a)
-							minN3 = fminf(minN3, dot(n3, vtx[a]));
+						for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
+							minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
 					}
 					else
 					{
-						for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-							minN3 = fminf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
+						// Otherwise perform a spatial locality exploiting graph search.
+						CLEAR_GRAPH_SEARCH();
+						hint = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, (k == 0) ? extremeVertexSearchHint3 : extremeVertexSearchHint3_b); // O(logV)?
+						if (k == 0) extremeVertexSearchHint3 = extremeVertexSearchHint3_b = hint;
+						else extremeVertexSearchHint3_b = hint;
+						minN3 = -minN3;
 					}
 
 					float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-					if (volume > 0.f && volume < minVolume)
+					if (volume < minVolume)
 					{
-						minOBB.pos = (n * (minN1 + maxN1) + n2 * (minN2 + maxN2) + n3 * (minN3 + maxN3)) * 0.5f;
+						minOBB.pos = (n*(minN1 + maxN1) + n2*(minN2 + maxN2) + n3*(minN3 + maxN3)) * 0.5f;
 						minOBB.axis[0] = n;
 						minOBB.axis[1] = n2;
 						minOBB.axis[2] = n3;
-						minOBB.r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
+						minOBB.r[0] = (maxN1 - minN1) * 0.5f;
+						minOBB.r[1] = (maxN2 - minN2) * 0.5f;
+						minOBB.r[2] = (maxN3 - minN3) * 0.5f;
 						minVolume = volume;
 					}
 				}
@@ -1584,22 +2011,23 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
-	// ----------------------------------------------------------------------------
-	// Category C: Test all configurations where two edges are on the same face
-	// (OBB aligns with a face of the convex hull).
-	// ----------------------------------------------------------------------------
-	for (int fi = 0; fi < F; ++fi)
+	// Main algorithm body for computing all search directions where the OBB touches two edges on the same face.
+	// This is O(F*sqrtE*logV)?
+	for(size_t ii = 0; ii < spatialFaceOrder.size(); ++ii) // O(F)
 	{
-		vec3 n1 = faceNormals[fi];
+		size_t i = spatialFaceOrder[ii];
+		vec3 n1 = faceNormals[i];
 
-		// Find the first non-internal edge of the face.
+		// Find two edges on the face. Since we have flexibility to choose from multiple edges of the same face,
+		// choose two that are possibly most opposing to each other, in the hope that their sets of sidepodal
+		// edges are most mutually exclusive as possible, speeding up the search below.
 		int e1 = -1;
-		int v0 = hull.f[fi][hull.f[fi].size() - 1];
-		for (size_t j = 0; j < hull.f[fi].size(); ++j)
+		int v0 = hull.f[i].back();
+		for(size_t j = 0; j < hull.f[i].size(); ++j)
 		{
-			int v1 = hull.f[fi][j];
-			int e = vertexPairsToEdges[v0 * V + v1];
-			if (e != EMPTY_EDGE && !isInternalEdge(e))
+			int v1 = hull.f[i][j];
+			int e = vertexPairsToEdges[v0*hull.v.size()+v1];
+			if (!IS_INTERNAL_EDGE(e))
 			{
 				e1 = e;
 				break;
@@ -1607,33 +2035,46 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			v0 = v1;
 		}
 		if (e1 == -1)
-			continue; // All edges of this face were degenerate internal edges!
+			continue; // All edges of this face were degenerate internal edges! Just skip processing the whole face.
 
 		const std::vector<int> &antipodals = antipodalPointsForEdge[e1];
 		const std::vector<int> &compatibleEdgesI = compatibleEdges[e1];
 
-		float maxN1 = dot(n1, vtx[edges[e1].first]);
-		float minN1 = FLT_MAX;
-		if (antipodals.empty())
+		float maxN1 = dot(n1, hull.v[edges[e1].first]);
+		float minN1;
+
+		if (antipodals.size() < 20)
 		{
-			for (int j = 0; j < V; ++j)
-				minN1 = fminf(minN1, dot(n1, vtx[j]));
+			minN1 = FLT_MAX;
+			for(size_t j = 0; j < antipodals.size(); ++j)
+				minN1 = fminf(minN1, dot(n1, hull.v[antipodals[j]]));
 		}
 		else
 		{
-			for (size_t j = 0; j < antipodals.size(); ++j)
-				minN1 = fminf(minN1, dot(n1, vtx[antipodals[j]]));
+			CLEAR_GRAPH_SEARCH();
+			extremeVertexSearchHint4 = ExtremeVertexConvex(hull, adjacencyData, -n1, floodFillVisited, floodFillVisitColor, minN1, extremeVertexSearchHint4); // O(logV)?
+			minN1 = -minN1;
 		}
 
-		for (size_t j = 0; j < compatibleEdgesI.size(); ++j)
+		for(size_t j = 0; j < compatibleEdgesI.size(); ++j)
 		{
 			int edge3 = compatibleEdgesI[j];
+			// Test all mutual compatible edges.
 			vec3 f3a = faceNormals[facesForEdge[edge3].first];
 			vec3 f3b = faceNormals[facesForEdge[edge3].second];
 
-			// Is edge3 compatible with direction n1?
+			// Is edge3 compatible with direction n?
+			// n3 = f3b + (f3a-f3b)*v
+			// n1.n3 = 0
+			// n1.(f3b + (f3a-f3b)*v) = 0
+			// n1.f3b + n1.((f3a-f3b)*v) = 0
+			// n1.f3b = (n1.(f3b-f3a))*v
+			// If n1.(f3b-f3a) != 0:
+			//    v = n1.f3b / n1.(f3b-f3a)
+			// If n1.(f3b-f3a) == 0:
+			//    n1.f3b must be zero as well, then arbitrary v is ok.
 			float num = dot(n1, f3b);
-			float denom = dot(n1, f3b - f3a);
+			float denom = dot(n1, f3b-f3a);
 			float v;
 			if (!EqualAbs(denom, 0.f))
 				v = num / denom;
@@ -1646,50 +2087,51 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
 				vec3 n2 = Normalized(cross(n3, n1));
 
-				float minN2 = FLT_MAX, maxN2 = -FLT_MAX;
-				for (int a = 0; a < V; ++a)
-				{
-					float d = dot(n2, vtx[a]);
-					if (d < minN2) minN2 = d;
-					if (d > maxN2) maxN2 = d;
-				}
-				float maxN3 = dot(n3, vtx[edges[edge3].first]);
+				float minN2, maxN2;
+				CLEAR_GRAPH_SEARCH();
+				extremeVertexSearchHint1 = ExtremeVertexConvex(hull, adjacencyData, n2, floodFillVisited, floodFillVisitColor, maxN2, extremeVertexSearchHint1); // O(logV)?
+				CLEAR_GRAPH_SEARCH();
+				extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, extremeVertexSearchHint2); // O(logV)?
+				minN2 = -minN2;
+				float maxN3 = dot(n3, hull.v[edges[edge3].first]);
 
-				float minN3 = FLT_MAX;
 				const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edge3];
-				if (antipodalsEdge3.empty())
+				float minN3 = FLT_MAX;
+				if (antipodalsEdge3.size() < 20) // If there are very few antipodal vertices, do a very tight loop and just iterate over each.
 				{
-					for (int a = 0; a < V; ++a)
-						minN3 = fminf(minN3, dot(n3, vtx[a]));
+					for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
+						minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
 				}
 				else
 				{
-					for (size_t a = 0; a < antipodalsEdge3.size(); ++a)
-						minN3 = fminf(minN3, dot(n3, vtx[antipodalsEdge3[a]]));
+					// Otherwise perform a spatial locality exploiting graph search.
+					CLEAR_GRAPH_SEARCH();
+					extremeVertexSearchHint3 = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, extremeVertexSearchHint3); // O(logV)?
+					minN3 = -minN3;
 				}
 
 				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-				if (volume > 0.f && volume < minVolume)
+				if (volume < minVolume)
 				{
-					minOBB.pos = (n1 * (minN1 + maxN1) + n2 * (minN2 + maxN2) + n3 * (minN3 + maxN3)) * 0.5f;
+					minOBB.pos = (n1*(minN1 + maxN1) + n2*(minN2 + maxN2) + n3*(minN3 + maxN3)) * 0.5f;
 					minOBB.axis[0] = n1;
 					minOBB.axis[1] = n2;
 					minOBB.axis[2] = n3;
-					minOBB.r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
+					minOBB.r[0] = (maxN1 - minN1) * 0.5f;
+					minOBB.r[1] = (maxN2 - minN2) * 0.5f;
+					minOBB.r[2] = (maxN3 - minN3) * 0.5f;
+					assert(volume > 0.f);
 					minVolume = volume;
 				}
 			}
 		}
 	}
 
-	if (minOBB.IsDegenerate())
-		return minOBB; // No configurations found, input is probably degenerate planar.
-
 	// The search for edge triplets does not follow cross-product orientation, so
 	// fix that up at the very last step, if necessary.
 	if (dot(cross(minOBB.axis[0], minOBB.axis[1]), minOBB.axis[2]) < 0.f)
 		minOBB.axis[2] = -minOBB.axis[2];
-
+	delete[] vertexPairsToEdges;
 	return minOBB;
 }
 
