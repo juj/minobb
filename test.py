@@ -110,7 +110,7 @@ def t_contcheck():
 def t_glb():
     """GLB pipeline: recompute hull/OBB for all GLBs, compare volumes to the
     reference .json files (see test_glb.py)."""
-    script = os.path.join(ROOT, "test_glb.py")
+    script = os.path.join(TEST_DIR, "test_glb.py")
     if not os.path.exists(script):
         record("glb", False, "test_glb.py not found", 0.0)
         return

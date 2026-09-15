@@ -11,7 +11,7 @@ reference .json.
 PASS if every volume matches (relative tolerance 1e-6); FAIL otherwise.
 The reference .json files are never modified (results go to tmp/glbtest/).
 
-Usage:        python test_glb.py
+Usage:        python test/test_glb.py
 Exit status:  0 = all passed, 1 = at least one failure
 """
 
@@ -22,8 +22,9 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-GLB_DIR = os.path.join(ROOT, "test", "glb")
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(TEST_DIR)
+GLB_DIR = os.path.join(TEST_DIR, "glb")
 TMP_DIR = os.path.join(ROOT, "tmp")
 GLBTEST_DIR = os.path.join(TMP_DIR, "glbtest")
 
