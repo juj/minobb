@@ -93,8 +93,14 @@ struct Hull3
 {
 	std::vector<vec3> v;  // Hull vertices.
 	std::vector<std::vector<int>> f; // Hull faces (triangles), CCW oriented from outside.
+	bool degenerate = false;
 
-	bool IsDegenerate() const { return v.size() <= 3 || f.empty(); }
+	// True if the input was planar, collinear, or a single point, i.e. the hull
+	// is not a solid polyhedron. In that case v/f hold the 2D convex hull: a
+	// flat polygon (corner points + coplanar fan triangles, all face normals
+	// pointing the same way), a line segment (two endpoints, no faces), or a
+	// single point.
+	bool IsDegenerate() const { return degenerate; }
 };
 
 // Computes the convex hull of the point set.
@@ -106,5 +112,7 @@ struct Hull3
 // hull output.
 //
 // The hull is degenerate (IsDegenerate() == true) if the points are planar,
-// collinear, or there are fewer than 4 distinct points.
+// collinear, or there are fewer than 4 distinct points. For planar input the
+// hull is the 2D convex polygon of the point set (flat, zero volume); for
+// collinear input it is the diameter segment; for a single point, the point.
 Hull3 convex_hull(float *pts, int num_pts, int stride_bytes);

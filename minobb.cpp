@@ -224,7 +224,12 @@ static float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDi
 	// Direction vector of the edge that the currently tested rectangle is in contact with.
 	float2 ed = float2(0.f, -1.f);
 	float minArea = FLT_MAX;
-	const float2 * const pEnd = &p[n];
+	// The hull is open (p[0..n-1], first point not repeated): NEXT_P must wrap
+	// from the LAST hull point back to p[0]. Wrapping at &p[n] instead would make
+	// NEXT_P(&p[n-1]) == &p[n], an out-of-bounds read whenever a caliper reaches
+	// the final hull vertex (MathGeoLib's original hull repeated the first point
+	// at index n, which this port does not).
+	const float2 * const pEnd = &p[n-1];
 
 	#define NEXT_P(ptr) ((ptr) == pEnd ? &p[0] : (ptr) + 1)
 
@@ -300,6 +305,94 @@ static inline dvec3 dnormalize(const dvec3 &a)
 {
 	double l = std::sqrt(dlen2(a));
 	return l > 0.0 ? dmul(a, 1.0 / l) : dvec3{0.0, 0.0, 0.0};
+}
+
+// 2D convex hull (Andrew's monotone chain, double precision) for degenerate
+// (planar or collinear) point sets. Projects the points onto their plane using
+// the basis (lineDir, w) derived from the bootstrap points ia/ib/ic, and returns
+// the flat polygon as a Hull3 with degenerate = true: a fan triangulation for
+// the planar case, a bare vertex list for the collinear / single-point cases.
+static Hull3 BuildPlanarHull(const std::vector<vec3> &pts, const std::vector<dvec3> &P,
+				       int n, int ia, int ib, int ic, const dvec3 &lineDir, double scale)
+{
+	Hull3 hull;
+	hull.degenerate = true;
+	if (n == 1)
+	{
+		hull.v.push_back(pts[0]);
+		return hull;
+	}
+	dvec3 icRel = dsub(P[ic], P[ia]);
+	double icDist = std::sqrt(dlen2(dsub(icRel, dmul(lineDir, ddot(lineDir, icRel)))));
+	if (icDist <= 1e-9 * scale)
+	{
+		// Collinear: the hull is the diameter segment.
+		hull.v.push_back(pts[ia]);
+		hull.v.push_back(pts[ib]);
+		return hull;
+	}
+	// Plane basis: u = lineDir (near-diameter direction), w = the
+	// perpendicular direction in the plane.
+	dvec3 w = dnormalize(dsub(icRel, dmul(lineDir, ddot(lineDir, icRel))));
+	// Project all points to the plane and run Andrew's monotone chain.
+	struct P2 { double s, t; int idx; };
+	std::vector<P2> q((size_t)n);
+	for (int i = 0; i < n; ++i)
+	{
+		dvec3 rel = dsub(P[i], P[ia]);
+		q[i] = P2{ ddot(lineDir, rel), ddot(w, rel), i };
+	}
+	std::sort(q.begin(), q.end(), [](const P2 &a, const P2 &b)
+	{
+		if (a.s != b.s) return a.s < b.s;
+		if (a.t != b.t) return a.t < b.t;
+		return a.idx < b.idx;
+	});
+	q.erase(std::unique(q.begin(), q.end(), [](const P2 &a, const P2 &b)
+	{ return a.s == b.s && a.t == b.t; }), q.end());
+	auto cross2 = [](const P2 &O, const P2 &A, const P2 &B)
+	{
+		return (A.s - O.s) * (B.t - O.t) - (A.t - O.t) * (B.s - O.s);
+	};
+	// Monotone chain: corners of the 2D convex hull in CCW order, no
+	// duplicated endpoint. Collinear edge points are dropped (only the
+	// extreme corners are kept).
+	std::vector<int> h2;
+	for (int i = 0; i < (int)q.size(); ++i)
+	{
+		while (h2.size() >= 2 &&
+			cross2(q[h2[h2.size() - 2]], q[h2[h2.size() - 1]], q[i]) <= 0.0)
+			h2.pop_back();
+		h2.push_back(i);
+	}
+	for (int i = (int)q.size() - 2, t = (int)h2.size() + 1; i >= 0; --i)
+	{
+		while (h2.size() > (size_t)t &&
+			cross2(q[h2[h2.size() - 2]], q[h2[h2.size() - 1]], q[i]) <= 0.0)
+			h2.pop_back();
+		h2.push_back(i);
+	}
+	if (!h2.empty())
+		h2.pop_back(); // Drop the duplicated first point.
+	hull.v.reserve(h2.size());
+	for (int i : h2)
+		hull.v.push_back(pts[q[i].idx]);
+	if (h2.size() >= 3)
+	{
+		// Fan-triangulate the flat polygon, orienting all faces so their
+		// normals point the same way (the +u x w plane normal).
+		dvec3 nPlane = dcross(lineDir, w);
+		for (size_t i = 1; i + 1 < h2.size(); ++i)
+		{
+			int a = 0, b = (int)i, c = (int)(i + 1);
+			vec3 n3 = cross(hull.v[b] - hull.v[a], hull.v[c] - hull.v[a]);
+			dvec3 n3d = dvec3{ (double)n3.x, (double)n3.y, (double)n3.z };
+			if (ddot(n3d, nPlane) < 0.0)
+				std::swap(b, c);
+			hull.f.push_back({ a, b, c });
+		}
+	}
+	return hull;
 }
 
 // Validates a hull built in double precision:
@@ -384,7 +477,10 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	}), pts.end());
 	const int n = (int)pts.size();
 	if (n == 0)
+	{
+		hull.degenerate = true;
 		return hull;
+	}
 
 	// Work in double precision (see dvec3 above).
 	std::vector<dvec3> P((size_t)n);
@@ -450,14 +546,9 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	const double tetThickness = baseNLen > 0.0
 		? std::fabs(ddot(baseN, dsub(P[id], P[ia]))) / baseNLen : 0.0;
 	if (baseNLen <= 1e-9 * scale || tetThickness <= 1e-9 * scale)
-	{
-		// The points are planar (or fewer than 4 unique points): signal degenerate so that
-		// the caller falls back to the 2D algorithm.
-		hull.v.resize(fminf((int)pts.size(), 3));
-		for (int i = 0; i < (int)hull.v.size(); ++i)
-			hull.v[i] = pts[i];
-		return hull;
-	}
+		// The points are planar, collinear, or there are fewer than 4 non-coplanar
+		// unique points: return a flat 2D convex hull instead of a solid polyhedron.
+		return BuildPlanarHull(pts, P, n, ia, ib, ic, lineDir, scale);
 
 	// Incremental construction in double precision. `order` is the insertion
 	// order of the remaining points. The result is order-independent in exact
