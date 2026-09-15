@@ -8,7 +8,7 @@ from objaverse.xl.sketchfab import SketchfabDownloader
 
 ANNOTATIONS_DIR = "./.objaverse"
 DOWNLOAD_DIR = "./test/glb"
-N_OBJECTS = 10
+N_OBJECTS = 500
 
 
 def handle_found_object(local_path, file_identifier, sha256, metadata):
@@ -26,7 +26,7 @@ def main():
         download_dir=ANNOTATIONS_DIR
     )
 
-    samples = annotations.sample(n=N_OBJECTS, random_state=43)
+    samples = annotations.sample(n=N_OBJECTS, random_state=44)
 
     downloaded = SketchfabDownloader.download_objects(
         samples,
