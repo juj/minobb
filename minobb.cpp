@@ -8,6 +8,90 @@
 #include <set>
 #include <assert.h>
 
+// ---------------------------------------------------------------------------
+// Optional per-stage profiling.
+//
+// Compile with PERF_TRACING_ENABLED defined (e.g. g++ -DPERF_TRACING_ENABLED)
+// to instrument the hot code paths with stage timers and loop counters. The
+// collected numbers are printed to stderr when the MINOBB_TRACE environment
+// variable is set (so a single binary can be switched on and off at run time).
+//
+// All instrumentation goes through the TRACE_* macros below. When
+// PERF_TRACING_ENABLED is not defined, every macro expands to a no-op that
+// does not evaluate any of its arguments, so the generated code is identical
+// to the uninstrumented version.
+// ---------------------------------------------------------------------------
+#ifdef PERF_TRACING_ENABLED
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+
+static bool TraceEnabled()
+{
+	static const bool on = getenv("MINOBB_TRACE") != nullptr;
+	return on;
+}
+static double TraceNow()
+{
+	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static void TraceLine(const char *msg, double sec)
+{
+	if (TraceEnabled())
+		fprintf(stderr, "trace: %-44s %10.4f s\n", msg, sec);
+}
+static void TraceFmt(double sec, const char *fmt, ...)
+{
+	if (!TraceEnabled())
+		return;
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	TraceLine(buf, sec);
+}
+// Cumulative counters for the extreme-vertex graph search (the innermost
+// loop of the OBB category search), reported as per-stage deltas.
+static long g_evcCalls = 0; // ExtremeVertexConvex() invocations
+static long g_evcSteps = 0; // neighbor relaxations inside ExtremeVertexConvex()
+
+#define TRACE_START()               TraceNow()
+#define TRACE_MARK(t0, stage)       do { TraceLine(stage, TraceNow() - (t0)); (t0) = TraceNow(); } while (0)
+#define TRACE_FMT(t0, fmt, ...)     do { TraceFmt(TraceNow() - (t0), fmt, __VA_ARGS__); (t0) = TraceNow(); } while (0)
+#define TRACE_TICK(t, accum)        do { (accum) += TraceNow() - (t); } while (0)
+#define TRACE_INC(ctr)              do { ++(ctr); } while (0)
+#define TRACE_EVC_CALL()            do { ++g_evcCalls; } while (0)
+#define TRACE_EVC_STEP()            do { ++g_evcSteps; } while (0)
+#define TRACE_EVC_RESET(bc, bs)     do { (bc) = g_evcCalls; (bs) = g_evcSteps; } while (0)
+#define TRACE_EVC_CALL_DELTA(bc)    (g_evcCalls - (bc))
+#define TRACE_EVC_STEP_DELTA(bs)    (g_evcSteps - (bs))
+#define TRACE_INSERT_REPORT(t0, tLoop, tScan, tHor, tReb, nPts, nVis, nFace, nPair) \
+	do { \
+		TraceFmt(TraceNow() - (tLoop), \
+			"hull: insert loop (face_scan=%.3f horizon=%.3f rebuild=%.3f; n=%zu visible_inserts=%ld face_checks=%ld horizon_pairs=%ld)", \
+			(double)(tScan), (double)(tHor), (double)(tReb), (nPts), (long)(nVis), (long)(nFace), (long)(nPair)); \
+		(void)(t0); \
+	} while (0)
+#else
+// Tracing disabled: every macro is a no-op. The (void) casts keep the timer
+// and counter locals "used" so that no warnings appear and the optimizer
+// removes everything.
+#define TRACE_START()               (0.0)
+#define TRACE_MARK(t0, stage)       do { (void)(t0); } while (0)
+#define TRACE_FMT(t0, fmt, ...)     do { (void)(t0); } while (0)
+#define TRACE_TICK(t, accum)        do { (void)(t); (void)(accum); } while (0)
+#define TRACE_INC(ctr)              do { (void)(ctr); } while (0)
+#define TRACE_EVC_CALL()            do {} while (0)
+#define TRACE_EVC_STEP()            do {} while (0)
+#define TRACE_EVC_RESET(bc, bs)     do { (void)(bc); (void)(bs); } while (0)
+#define TRACE_EVC_CALL_DELTA(bc)    (0L)
+#define TRACE_EVC_STEP_DELTA(bs)    (0L)
+#define TRACE_INSERT_REPORT(t0, tLoop, tScan, tHor, tReb, nPts, nVis, nFace, nPair) \
+	do { (void)(t0); (void)(tLoop); (void)(tScan); (void)(tHor); (void)(tReb); (void)(nPts); (void)(nVis); (void)(nFace); (void)(nPair); } while (0)
+#endif
+
 float dot(const vec3 &a, const vec3 &b)
 {
 	return a.x*b.x + a.y*b.y + a.z*b.z;
@@ -73,7 +157,7 @@ static vec3 Normalized(const vec3 &v)
 static vec3 Perpendicular(const vec3 &v)
 {
 	// Choose the smallest magnitude component and cross with the corresponding unit axis.
-	const vec3 a = abs(v);
+	vec3 a = abs(v);
 	float x = (float)(a.x < a.y && a.x < a.z);
 	float y = (float)(a.y <= a.x && a.y < a.z);
 	float z = (float)(a.z <= a.x && a.z <= a.y);
@@ -453,6 +537,7 @@ static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &h
 static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
 	Hull3 hull;
+	double t0 = TRACE_START();
 
 	// Remove exact duplicates.
 	std::vector<vec3> pts = ptsIn;
@@ -481,6 +566,7 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		P[i] = dvec3{(double)pts[i].x, (double)pts[i].y, (double)pts[i].z};
 		scale = std::max(scale, std::sqrt(dlen2(P[i])));
 	}
+	TRACE_MARK(t0, "hull: dedup+sort+dvec3");
 	const double eps = 1e-6 * scale; // Coplanarity tolerance (true distance).
 
 	// Robust bootstrap: a well-conditioned tetrahedron. Take a lexicographic
@@ -536,6 +622,7 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	const double baseNLen = std::sqrt(dlen2(baseN));
 	const double tetThickness = baseNLen > 0.0
 		? std::fabs(ddot(baseN, dsub(P[id], P[ia]))) / baseNLen : 0.0;
+	TRACE_MARK(t0, "hull: bootstrap (O(n) passes)");
 	if (baseNLen <= 1e-9 * scale || tetThickness <= 1e-9 * scale)
 		// The points are planar, collinear, or there are fewer than 4 non-coplanar
 		// unique points: return a flat 2D convex hull instead of a solid polyhedron.
@@ -570,6 +657,11 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		addFace(0, 2, 3, 1);
 		addFace(1, 2, 3, 0);
 
+		// Profiling state for the insertion loop (all access goes through the
+		// TRACE_* macros; when PERF_TRACING_ENABLED is off this is inert).
+		long faceChecks = 0, visibleInserts = 0, horizonPairs = 0;
+		double tScan = 0.0, tHorizon = 0.0, tRebuild = 0.0;
+		double tLoop = TRACE_START();
 		for (int oi = 0; oi < (int)order.size(); ++oi)
 		{
 			int i = order[oi];
@@ -578,6 +670,7 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 			const dvec3 &q = P[i];
 
 			// Find all faces visible from q.
+			double t = TRACE_START();
 			std::vector<int> visible;
 			for (size_t fi = 0; fi < hf.size(); ++fi)
 			{
@@ -585,11 +678,14 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 				dvec3 n = dnormalize(dcross(dsub(hv[face[1]], hv[face[0]]), dsub(hv[face[2]], hv[face[0]])));
 				// Distance from q to the face plane (positive = outside the hull).
 				double dist = ddot(n, dsub(q, hv[face[0]]));
+				TRACE_INC(faceChecks);
 				if (dist > eps)
 					visible.push_back((int)fi);
 			}
+			TRACE_TICK(t, tScan);
 			if (visible.empty())
 				continue; // q is inside (or on) the hull.
+			TRACE_INC(visibleInserts);
 
 			// Collect the horizon: directed edges of the visible region that border a
 			// non-visible face.
@@ -602,21 +698,27 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 				visEdges.push_back({ face[1], face[2] });
 				visEdges.push_back({ face[2], face[0] });
 			}
+			t = TRACE_START();
 			std::vector<DirEdge> horizon;
 			for (const DirEdge &e : visEdges)
 			{
 				bool hasReverse = false;
 				for (const DirEdge &o : visEdges)
+				{
+					TRACE_INC(horizonPairs);
 					if (o.a == e.b && o.b == e.a)
-					hasReverse = true;
+						hasReverse = true;
+				}
 				if (!hasReverse)
 					horizon.push_back(e);
 			}
+			TRACE_TICK(t, tHorizon);
 
 			int qIdx = (int)hv.size();
 			hv.push_back(q);
 
 			// Rebuild the faces: keep the non-visible ones, add a new face for each horizon edge.
+			t = TRACE_START();
 			std::vector<std::vector<int>> newFaces;
 			newFaces.reserve(hf.size());
 			for (size_t fi = 0; fi < hf.size(); ++fi)
@@ -630,10 +732,14 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 			for (const DirEdge &he : horizon)
 				newFaces.push_back({ he.a, he.b, qIdx }); // (a, b, q) is outward oriented (horizon runs CCW around the hole).
 			hf.swap(newFaces);
+			TRACE_TICK(t, tRebuild);
 		}
+		TRACE_INSERT_REPORT(t0, tLoop, tScan, tHorizon, tRebuild, order.size(), visibleInserts, faceChecks, horizonPairs);
+
 
 		// Robustness pass: ensure all face normals point strictly outward. On a
 		// valid convex hull every other vertex must lie on or behind the face plane.
+		double tRob = TRACE_START();
 		for (size_t fi = 0; fi < hf.size(); ++fi)
 		{
 			std::vector<int> &face = hf[fi];
@@ -651,12 +757,14 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 				}
 			}
 		}
+		TRACE_MARK(tRob, "hull: robustness pass (orient normals)");
 
 		// Remove vertices not referenced by any face (points that turned out to be
 		// interior during the incremental construction). The original
 		// Polyhedron::ConvexHull stores only the actual hull vertices; keeping the
 		// interior points around would make the antipodal search below O(E*n) in
 		// the input size instead of O(E*V_hull).
+		double tStrip = TRACE_START();
 		std::vector<unsigned char> used(hv.size(), 0);
 		for (size_t fi = 0; fi < hf.size(); ++fi)
 			for (int j = 0; j < 3; ++j)
@@ -674,6 +782,7 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 			for (int j = 0; j < 3; ++j)
 				hf[fi][j] = remap[hf[fi][j]];
 		hv.swap(newV);
+		TRACE_MARK(tStrip, "hull: strip interior verts");
 	};
 
 	std::vector<int> order((size_t)n);
@@ -683,7 +792,10 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	std::vector<dvec3> hv;
 	std::vector<std::vector<int>> hf;
 	buildWithOrder(order, hv, hf);
-	if (!HullValid(hv, hf, scale))
+	t0 = TRACE_START();
+	bool valid = HullValid(hv, hf, scale);
+	TRACE_MARK(t0, "hull: HullValid");
+	if (!valid)
 	{
 		// Retry with the reverse insertion order: near-coplanar micro-slivers are
 		// order-dependent, and a different order often builds a clean hull.
@@ -691,7 +803,9 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		std::vector<dvec3> hv2;
 		std::vector<std::vector<int>> hf2;
 		buildWithOrder(order, hv2, hf2);
-		if (HullValid(hv2, hf2, scale))
+		bool valid2 = HullValid(hv2, hf2, scale);
+		TRACE_MARK(t0, "hull: retry (reverse order) + HullValid");
+		if (valid2)
 		{
 			hv = std::move(hv2);
 			hf = std::move(hf2);
@@ -1369,6 +1483,7 @@ int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > 
 	numSearchStepsDone = 0;
 	numImprovementsMade = 0;
 #endif
+	TRACE_EVC_CALL();
 	float curD = dot(direction, hull.v[startingVertex]);
 	const int *neighbors = &adjacencyData[startingVertex][0];
 	const int *neighborsEnd = neighbors + adjacencyData[startingVertex].size();
@@ -1378,6 +1493,7 @@ int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > 
 	float secondBestD = curD - 1e-3f;
 	while(neighbors != neighborsEnd)
 	{
+		TRACE_EVC_STEP();
 		int n = *neighbors++;
 		if (floodFillVisited[n] != floodFillVisitColor)
 		{
@@ -1451,6 +1567,9 @@ vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
 static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 {
+	double t0 = TRACE_START();
+	long evcCalls0 = 0, evcSteps0 = 0;
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
 	/* Outline of the algorithm:
 	  0. Compute the convex hull of the point set (given as input to this function) O(VlogV)
 	  1. Compute vertex adjacency data, i.e. given a vertex, return a list of its neighboring vertices. O(V)
@@ -1525,6 +1644,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			v0 = v1;
 		}
 	}
+
+	TRACE_FMT(t0, "obb: precompute adjacency+edges (V=%d F=%d E=%d)", V, F, (int)edges.size());
 
 	// Throughout the algorithm, internal edges can all be discarded, so provide a helper macro to test for that.
 #define IS_INTERNAL_EDGE(i) (dot(faceNormals[facesForEdge[i].first], faceNormals[facesForEdge[i].second]) > 1.f - 1e-4f)
@@ -1601,6 +1722,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
+	TRACE_MARK(t0, "obb: spatial ordering (dual-graph walk)");
+
 	// Stores a memory of yet unvisited vertices for current graph search.
 	std::vector<int> traverseStack;
 
@@ -1615,6 +1738,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Precomputation: for each edge, we need to compute the list of potential antipodal points (points on
 	// the opposing face of an enclosing OBB of the face that is flush with the given edge of the polyhedron).
 	// This is O(E*log(V)) ?
+	long antiFallbacks = 0;
 	//for (size_t i = 0; i < edges.size(); ++i) // O(E)
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
@@ -1668,6 +1792,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		// to numerical imprecision in the above loop over adjacent edges.
 		if (antipodalPointsForEdge[i].empty())
 		{
+			TRACE_INC(antiFallbacks);
 //			LOGW("Due to numerical stability issues(?), could not find an antipodal vertex for edge %d! Check the scale of your input dataset! Good scale is having coordinates range e.g. [0.0,100.0]", edges[i]);
 			// Getting here is most likely a bug. Fall back to linear scan, which is very slow.
 			for(size_t j = 0; j < hull.v.size(); ++j) // O(V)
@@ -1678,6 +1803,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 //#endif
+	TRACE_FMT(t0, "obb: antipodal precompute (evc calls=%ld steps=%ld fallbacks=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0), antiFallbacks);
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
 
 	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with.
 	std::vector<std::vector<int>> compatibleEdges(E);
@@ -1758,6 +1886,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
+	TRACE_FMT(t0, "obb: sidepodal precompute (evc calls=%ld steps=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
+
 	// Take advantage of spatial locality: start the search for the extreme vertex from the extreme vertex
 	// that was found during the previous iteration for the previous edge. This speeds up the search since
 	// edge directions have some amount of spatial locality and the next extreme vertex is often close
@@ -1774,6 +1906,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Stores a memory of yet unvisited vertices that are common sidepodal vertices to both currently chosen edges for current graph search.
 	std::vector<int> traverseStackCommonSidepodals;
 
+	// Category 1: all configurations where the OBB is flush with three edges on adjacent faces.
 //	for(size_t i = 0; i < edges.size(); ++i) // O(|E|)
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
@@ -1905,11 +2038,15 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
+	TRACE_FMT(t0, "obb: category 1: 3 adjacent faces (evc calls=%ld steps=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
+
 	std::vector<int> antipodalEdges;
 	std::vector<vec3> antipodalEdgeNormals;
 
-	// Main algorithm body for finding all search directions where the OBB is flush with the edges of the
-	// convex hull from two opposing faces. This is O(E*sqrtE*logV)?
+	// Category 2: main algorithm body for finding all search directions where the OBB is flush with the
+	// edges of the convex hull from two opposing faces. This is O(E*sqrtE*logV)?
 //	for (size_t i = 0; i < edges.size(); ++i) // O(E)
 ///	{
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
@@ -2047,8 +2184,12 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
-	// Main algorithm body for computing all search directions where the OBB touches two edges on the same face.
-	// This is O(F*sqrtE*logV)?
+	TRACE_FMT(t0, "obb: category 2: opposing faces (evc calls=%ld steps=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
+
+	// Category 3: main algorithm body for computing all search directions where the OBB touches two edges
+	// on the same face. This is O(F*sqrtE*logV)?
 	for(size_t ii = 0; ii < spatialFaceOrder.size(); ++ii) // O(F)
 	{
 		size_t i = spatialFaceOrder[ii];
@@ -2163,6 +2304,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		}
 	}
 
+	TRACE_FMT(t0, "obb: category 3: same face (evc calls=%ld steps=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+
 	// The search for edge triplets does not follow cross-product orientation, so
 	// fix that up at the very last step, if necessary.
 	if (dot(cross(minOBB.axis[0], minOBB.axis[1]), minOBB.axis[2]) < 0.f)
@@ -2196,6 +2340,7 @@ static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, con
 OBB minobb(float *pts, int num_pts, int stride_bytes)
 {
 	OBB degenerate;
+	double minobbT0 = TRACE_START();
 	degenerate.pos = vec3(0.f, 0.f, 0.f);
 	degenerate.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 	degenerate.axis[0] = vec3(1.f, 0.f, 0.f);
@@ -2223,6 +2368,8 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 	{
 		return a.x == b.x && a.y == b.y && a.z == b.z;
 	}), points.end());
+
+	TRACE_MARK(minobbT0, "minobb: copy+sort+dedup");
 
 	const int n = (int)points.size();
 	if (n == 0)
@@ -2255,12 +2402,22 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 	// vertex-edge-face connectivity information about the convex hull shape, and
 	// this also allows discarding all points in the interior of the input hull,
 	// which are irrelevant.
-	Hull3 convexHull = ConvexHull3(points);
+	Hull3 convexHull;
+	{
+		double t0 = TRACE_START();
+		convexHull = ConvexHull3(points);
+		TRACE_FMT(t0, "minobb: ConvexHull3 (n=%d, hull=%zu v)", n, convexHull.v.size());
+	}
 	if (convexHull.IsDegenerate())
 		// The points are planar (or nearly so): compute a flat OBB with the 2D algorithm.
 		return SmallestOBBVolume2DPlanar(points);
 
-	OBB optimalObb = OptimalEnclosingOBB3D(convexHull);
+	OBB optimalObb;
+	{
+		double t0 = TRACE_START();
+		optimalObb = OptimalEnclosingOBB3D(convexHull);
+		TRACE_MARK(t0, "minobb: OptimalEnclosingOBB3D");
+	}
 	if (optimalObb.IsDegenerate())
 	{
 		// The category search found no configuration at all. For nearly-planar hulls the
@@ -2283,6 +2440,9 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 		// in ComputeBasis), which makes the center/extent bookkeeping of the winning
 		// configuration inconsistent by a few ulps of the box size. Re-deriving the box
 		// in the same orientation guarantees containment (up to pure float rounding).
-		return FixedOrientationEnclosingOBB(points, optimalObb.axis[0], optimalObb.axis[1]);
+		double t0 = TRACE_START();
+		OBB o = FixedOrientationEnclosingOBB(points, optimalObb.axis[0], optimalObb.axis[1]);
+		TRACE_MARK(t0, "minobb: retighten (3x O(n) scans)");
+		return o;
 	}
 }

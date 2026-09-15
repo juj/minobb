@@ -597,6 +597,7 @@ int main(int argc, char **argv)
 	const size_t max_points = (argc >= 3) ? strtoull(argv[2], nullptr, 10) : 0;
 
 	std::vector<char> glb;
+		double tLoad0 = NowSeconds();
 	if (!ReadEntireFile(argv[1], glb))
 	{
 		fprintf(stderr, "error: cannot read %s\n", argv[1]);
@@ -657,6 +658,8 @@ int main(int argc, char **argv)
 		offset += chunk_length;
 	}
 	(void)bin_size;
+	double tJson0 = NowSeconds();
+	fprintf(stderr, "info: load+chunks: %.3fs (%zu bytes)\n", tJson0 - tLoad0, glb.size());
 
 	if (json_str.empty())
 	{
@@ -673,6 +676,8 @@ int main(int argc, char **argv)
 	// since glTF buffer 0 offsets are relative to the start of the BIN data).
 	JsonParser parser(json_str.c_str());
 	JsonValue json = JsonParser::ParseValue(parser);
+	double tXform0 = NowSeconds();
+	fprintf(stderr, "info: json parse: %.3fs\n", tXform0 - tJson0);
 	if (!parser.ok)
 	{
 		fprintf(stderr, "error: failed to parse GLB JSON chunk\n");
@@ -684,6 +689,7 @@ int main(int argc, char **argv)
 	std::vector<char> bin_view(bin_data, bin_data + bin_size);
 	if (!ExtractWorldPoints(bin_view, json, pts))
 		return 1;
+	fprintf(stderr, "info: world transform: %.3fs\n", NowSeconds() - tXform0);
 
 	const int total_pts = (int)(pts.size() / 3);
 
