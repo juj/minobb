@@ -20,7 +20,7 @@ vec3 cross(const vec3 &a, const vec3 &b)
 
 float OBB::Volume() const
 {
-	return (r.x * 2.f) * (r.y * 2.f) * (r.z * 2.f);
+	return r.x * r.y * r.z * 8.f;
 }
 
 bool OBB::IsDegenerate() const
