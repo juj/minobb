@@ -714,12 +714,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "info: subsampled to %d points (uniform grid, max_points=%zu)\n",
 			num_pts, max_points);
 
-	// Compute the convex hull and the minimum-volume OBB (timed with
-	// QueryPerformanceCounter; the times are stored in the JSON output).
+	// Compute the convex hull, then the minimum-volume OBB from it (two-pass
+	// API; timed with QueryPerformanceCounter, the times go into the JSON).
 	double t0 = NowSeconds();
 	Hull3 hull = convex_hull(pts.data(), num_pts, 12);
 	double t1 = NowSeconds();
-	OBB obb = minobb(pts.data(), num_pts, 12);
+	OBB obb = minobb(hull);
 	double t2 = NowSeconds();
 	const double hull_sec = t1 - t0;
 	const double obb_sec = t2 - t1;

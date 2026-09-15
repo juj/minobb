@@ -12,7 +12,7 @@ int main(int argc, char **argv)
 		while (fscanf(f, "%f %f %f", &x, &y, &z) == 3) { v.push_back(x); v.push_back(y); v.push_back(z); }
 		fclose(f);
 		int n = (int)v.size() / 3;
-		OBB o = minobb(&v[0], n, 12);
+		OBB o = minobb(convex_hull(&v[0], n, 12));
 		float worst = 0.f; int wv = -1, wa = -1;
 		for (int i = 0; i < n; ++i)
 		{

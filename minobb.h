@@ -6,21 +6,28 @@
 // "Optimal bounding boxes for non-triangular meshes", section 5).
 //
 // minobb() computes the (conjectured) minimum-volume OBB enclosing the given
-// point set:
+// convex hull (and hence the point set the hull was computed from):
 //   A) Three edges of the convex hull touch three mutually adjacent faces of the OBB.
 //   B) Two edges touch two opposite faces of the OBB, and a third edge touches a
 //      face adjacent to the two.
 //   C) Two edges touch two faces of the OBB, where one of the OBB's faces is flush
 //      with a whole face of the convex hull.
 //
-// The algorithm computes the exact convex hull of the input points and then
-// enumerates the candidate box orientations implied by the contact configurations
-// above (the paper's Theorem 7.1: the minimum-volume OBB touches at least three
-// edges of the polyhedron, two of which touch two distinct faces of the OBB).
+// Typical usage is a two-pass run:
+//   Hull3 hull = convex_hull(pts, num_pts, stride_bytes);
+//   OBB obb = minobb(hull);
 //
-// Complexity: O(n^2) convex hull + O(E^3) configuration enumeration in the worst
-// case (E = number of convex hull edges, E <= 3n/2). Intended for small to
-// medium sized point sets, not for million-point meshes.
+// minobb() enumerates the candidate box orientations implied by the contact
+// configurations above (the paper's Theorem 7.1: the minimum-volume OBB touches
+// at least three edges of the polyhedron, two of which touch two distinct faces
+// of the OBB). It only needs the hull vertices and face connectivity: for any
+// axis direction the extreme input point is a hull vertex, so the resulting box
+// is exact for the full input at a fraction of the cost.
+//
+// Complexity: O(n^2) for the convex hull (convex_hull()) + O(E^3) configuration
+// enumeration for minobb() in the worst case (E = number of convex hull edges,
+// E <= 3n/2). Intended for small to medium sized point sets, not for
+// million-point meshes.
 //
 // Degenerate input (all points in a plane, on a line, or a single point) is
 // handled by a 2D rotating-calipers / 1D fallback, producing a flat OBB.
@@ -77,15 +84,19 @@ struct OBB
 	float Distance(const vec3 &p) const;
 };
 
+struct Hull3; // Forward declaration (defined below).
+
 // Computes the minimum-volume OBB (conjectured, see Theorem 7.1 of the paper)
-// enclosing the point set.
+// enclosing the given convex hull (and hence the point set the hull was
+// computed from).
 //
-// `pts` points to an array of `num_pts` xyz point triples in floats.
-// `stride_bytes` is the byte stride between consecutive points (e.g. 12 for
-// tightly packed floats, or larger if the points are embedded in a struct).
+// `hull` must be the result of convex_hull() for the point set of interest.
+// For degenerate (planar/collinear/single-point) hulls a flat OBB is returned
+// via a 2D rotating-calipers / 1D fallback.
 //
-// Returns a degenerate OBB (IsDegenerate() == true) if num_pts < 1.
-OBB minobb(float *pts, int num_pts, int stride_bytes);
+// Returns a degenerate OBB (IsDegenerate() == true) if the hull has no
+// vertices.
+OBB minobb(const Hull3 &hull);
 
 // A triangle mesh representing a convex hull: vertices `v` and triangular
 // faces `f` (indices into `v`), CCW oriented from outside.

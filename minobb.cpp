@@ -2337,43 +2337,25 @@ static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, con
 // Public entry point
 // ----------------------------------------------------------------------------
 
-OBB minobb(float *pts, int num_pts, int stride_bytes)
+OBB minobb(const Hull3 &hull)
 {
 	OBB degenerate;
-	double minobbT0 = TRACE_START();
 	degenerate.pos = vec3(0.f, 0.f, 0.f);
 	degenerate.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 	degenerate.axis[0] = vec3(1.f, 0.f, 0.f);
 	degenerate.axis[1] = vec3(0.f, 1.f, 0.f);
 	degenerate.axis[2] = vec3(0.f, 0.f, 1.f);
 
-	if (!pts || num_pts <= 0 || stride_bytes < 12)
+	if (hull.v.empty())
 		return degenerate;
 
-	// Copy the (possibly strided) input into a contiguous array, removing duplicates.
-	std::vector<vec3> points;
-	points.reserve((size_t)num_pts);
-	for (int i = 0; i < num_pts; ++i)
-	{
-		const float *p = (const float *)pts + (size_t)i * (stride_bytes / 4);
-		points.push_back(vec3(p[0], p[1], p[2]));
-	}
-	std::sort(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
-	{
-		if (a.x != b.x) return a.x < b.x;
-		if (a.y != b.y) return a.y < b.y;
-		return a.z < b.z;
-	});
-	points.erase(std::unique(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
-	{
-		return a.x == b.x && a.y == b.y && a.z == b.z;
-	}), points.end());
-
-	TRACE_MARK(minobbT0, "minobb: copy+sort+dedup");
+	// The hull vertices are input points and every input point lies on or inside
+	// the hull, so for any axis direction the extreme input point is a hull
+	// vertex. All min/max scans in this function therefore run over the hull
+	// vertices only, which is exact and much cheaper than scanning the raw input.
+	const std::vector<vec3> &points = hull.v;
 
 	const int n = (int)points.size();
-	if (n == 0)
-		return degenerate;
 
 	// Handle the trivial cases (same as the original).
 	if (n == 1)
@@ -2398,24 +2380,17 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 		return o;
 	}
 
-	// Compute the convex hull of the input point set. This is because we need
-	// vertex-edge-face connectivity information about the convex hull shape, and
-	// this also allows discarding all points in the interior of the input hull,
-	// which are irrelevant.
-	Hull3 convexHull;
-	{
-		double t0 = TRACE_START();
-		convexHull = ConvexHull3(points);
-		TRACE_FMT(t0, "minobb: ConvexHull3 (n=%d, hull=%zu v)", n, convexHull.v.size());
-	}
-	if (convexHull.IsDegenerate())
-		// The points are planar (or nearly so): compute a flat OBB with the 2D algorithm.
+	if (hull.IsDegenerate())
+		// The points are planar (or nearly so): compute a flat OBB with the 2D
+		// algorithm. Running it on the hull vertices is exact: a linear projection
+		// commutes with the convex hull, so the 2D hull of the projected input
+		// equals the 2D hull of the projected hull vertices.
 		return SmallestOBBVolume2DPlanar(points);
 
 	OBB optimalObb;
 	{
 		double t0 = TRACE_START();
-		optimalObb = OptimalEnclosingOBB3D(convexHull);
+		optimalObb = OptimalEnclosingOBB3D(hull);
 		TRACE_MARK(t0, "minobb: OptimalEnclosingOBB3D");
 	}
 	if (optimalObb.IsDegenerate())
@@ -2426,7 +2401,7 @@ OBB minobb(float *pts, int num_pts, int stride_bytes)
 		// (exact given each candidate axis) first, and keep the better of the two. The
 		// volume > 0 check rejects the sweep's "no result" sentinel, which can otherwise
 		// (volume 0) beat any real box in the comparison below.
-		OBB sweep = CoarseSweepEnclosingOBB(convexHull.v);
+		OBB sweep = CoarseSweepEnclosingOBB(hull.v);
 		OBB planar = SmallestOBBVolume2DPlanar(points);
 		if (!sweep.IsDegenerate() && sweep.Volume() > 0.f && sweep.Volume() < planar.Volume())
 			return sweep;
