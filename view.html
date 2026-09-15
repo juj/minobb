@@ -18,6 +18,10 @@
   }
   #hud label.disabled { opacity: 0.4; cursor: default; }
   #hud input { vertical-align: middle; }
+  #hud hr { border: none; border-top: 1px solid #888; margin: 6px 0; }
+  body.light { background: #d0d0d0; }
+  body.light #hud { background: rgba(255,255,255,0.75); color: #222; }
+  body.light #hud hr { border-top-color: #999; }
 </style>
 <script type="importmap">
 {
@@ -31,9 +35,12 @@
 <body>
 <div id="hud">
   <div id="hudtext">loading...</div>
+  <label id="lbl-object"><input type="checkbox" id="cb-object" checked> Show object</label>
   <label id="lbl-hull"><input type="checkbox" id="cb-hull" checked> Show Convex Hull</label>
   <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB</label>
   <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB</label>
+  <hr>
+  <label id="lbl-dark"><input type="checkbox" id="cb-dark" checked> Dark Mode</label>
 </div>
 <canvas id="app"></canvas>
 <script type="module">
@@ -173,26 +180,46 @@ function polyhedronVolume(vertices, faces) {
 // Overlay groups, toggled by the checkboxes in the HUD panel.
 let hullGroup = null, obbGroup = null, aabbGroups = [];
 
+const cbObject = document.getElementById('cb-object');
 const cbHull = document.getElementById('cb-hull');
 const cbOBB = document.getElementById('cb-obb');
 const cbAABB = document.getElementById('cb-aabb');
+const cbDark = document.getElementById('cb-dark');
+
+// The loaded GLB scene root, toggled by the "Show object" checkbox.
+let modelObj = null;
 
 // Checkbox state persists across pages via localStorage.
 const PREFS_KEY = 'minobb_view_overlays';
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      hull: cbHull.checked, obb: cbOBB.checked, aabb: cbAABB.checked
+      object: cbObject.checked,
+      hull: cbHull.checked, obb: cbOBB.checked, aabb: cbAABB.checked,
+      dark: cbDark.checked
     }));
   } catch (e) { /* storage unavailable (private mode etc.): ignore */ }
 }
 try {
   const prefs = JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+  if (typeof prefs.object === 'boolean') cbObject.checked = prefs.object;
   if (typeof prefs.hull === 'boolean') cbHull.checked = prefs.hull;
   if (typeof prefs.obb === 'boolean') cbOBB.checked = prefs.obb;
   if (typeof prefs.aabb === 'boolean') cbAABB.checked = prefs.aabb;
+  if (typeof prefs.dark === 'boolean') cbDark.checked = prefs.dark;
 } catch (e) { /* corrupted/absent prefs: keep defaults */ }
 
+// Dark / light theme: page + HUD colors via a body class, and the three.js
+// scene background (light in light mode so dark geometry is visible).
+function applyTheme() {
+  const dark = cbDark.checked;
+  document.body.classList.toggle('light', !dark);
+  scene.background = new THREE.Color(dark ? 0x202020 : 0xd0d0d0);
+}
+applyTheme();
+cbDark.addEventListener('change', () => { applyTheme(); savePrefs(); });
+
+cbObject.addEventListener('change', () => { if (modelObj) modelObj.visible = cbObject.checked; savePrefs(); });
 cbHull.addEventListener('change', () => { if (hullGroup) hullGroup.visible = cbHull.checked; savePrefs(); });
 cbOBB.addEventListener('change', () => { if (obbGroup) obbGroup.visible = cbOBB.checked; savePrefs(); });
 cbAABB.addEventListener('change', () => {
@@ -207,6 +234,7 @@ function bindCheckbox(cb, label, groupExists) {
 
 function fail(msg) {
   hudText.textContent = msg;
+  bindCheckbox(cbObject, document.getElementById('lbl-object'), false);
   bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
   bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
   bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
@@ -221,6 +249,8 @@ if (!url) {
     async (gltf) => {
       const model = gltf.scene;
       scene.add(model);
+      modelObj = model;
+      model.visible = cbObject.checked;
 
       // minobb_glb computes the hull/OBB in scene (world) space over all
       // meshes, so the overlays are added to the scene root.
@@ -230,7 +260,13 @@ if (!url) {
         const resp = await fetch(jsonUrl);
         if (resp.ok) {
           const data = await resp.json();
-          const parent = model;
+          // The overlays live in a sibling group, NOT under the model: three.js
+          // inherits a parent's invisibility to its whole subtree, so parenting
+          // them to the model would make "Show object" hide them as well. The
+          // JSON coordinates are in world space, and gltf.scene sits at the scene
+          // root with an identity transform, so scene-space == model-root-space.
+          const parent = new THREE.Group();
+          scene.add(parent);
           if (data.hull && data.hull.vertices && data.hull.vertices.length &&
               data.hull.faces && data.hull.faces.length) {
             hullGroup = drawHull(data.hull);
@@ -238,8 +274,12 @@ if (!url) {
             parent.add(hullGroup);
           }
           let obbOk = false;
+          // Note: h >= 0, not h > 0 — a valid OBB of a planar (or collinear)
+          // point set has zero extent along one (or two) axes; only the
+          // C++ degenerate sentinel (negative extents) is rejected, via
+          // !data.obb.degenerate.
           if (data.obb && !data.obb.degenerate &&
-              data.obb.half_extents.every(h => h > 0)) {
+              data.obb.half_extents.every(h => h >= 0)) {
             obbGroup = drawOBB(data.obb);
             obbGroup.visible = cbOBB.checked;
             parent.add(obbGroup);
