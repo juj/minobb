@@ -6,6 +6,7 @@
 #include <cfloat>
 #include <cstring>
 #include <set>
+#include <map>
 #include <assert.h>
 
 // ---------------------------------------------------------------------------
@@ -534,6 +535,277 @@ static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &h
 	return adjacencyData;
 }
 
+vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
+{
+	const std::vector<int> &face = poly.f[faceIndex];
+	if (face.size() == 3)
+	{
+		vec3 a = poly.v[face[0]];
+		vec3 b = poly.v[face[1]];
+		vec3 c = poly.v[face[2]];
+		return Normalized(cross(b-a, c-a));
+	}
+	else if (face.size() > 3)
+	{
+		// Use Newell's method of computing the face normal for best stability.
+		// See Christer Ericson, Real-Time Collision Detection, pp. 491-495.
+		vec3 normal(0, 0, 0);
+		int v0 = face.back();
+		for(size_t i = 0; i < face.size(); ++i)
+		{
+			int v1 = face[i];
+			normal.x += (double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z); // Project on yz
+			normal.y += (double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x); // Project on xz
+			normal.z += (double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y); // Project on xy
+			v0 = v1;
+		}
+		return Normalized(normal);
+	}
+	else if (face.size() == 2)
+		return Normalized(cross(poly.v[face[1]] - poly.v[face[0]], Perpendicular(poly.v[face[0]] - poly.v[face[1]]) - poly.v[face[0]]));
+	else if (face.size() == 1)
+		return vec3(0, 1, 0);
+	else
+		return vec3(__builtin_nan(0), __builtin_nan(0), __builtin_nan(0));
+}
+
+static void PolyExtremeVertexOnFace(const Hull3 &poly, int face, const vec3 &dir, float &outMin, float &outMax)
+{
+	outMin = FLT_MAX;
+	outMax = -FLT_MAX;
+	for(size_t i = 0; i < poly.f[face].size(); ++i)
+	{
+		float d = dot(dir, poly.v[poly.f[face][i]]);
+		outMin = fminf(outMin, d);
+		outMax = fmaxf(outMax, d);
+	}
+}
+
+void RemoveDegenerateFaces(Hull3 &hull)
+{
+	size_t n = 0;
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		if (hull.f[i].size() >= 3)
+		{
+			if (n != i)
+				hull.f[n] = hull.f[i];
+			++n;
+		}
+	}
+	hull.f.erase(hull.f.begin()+n, hull.f.end());
+}
+
+/** Does a binary search on the array list that is sorted in ascending order.
+	@param list [in] A pointer to the array to search.
+	@param numItems The number of elements in the array 'list'.
+	@param value The element to search for.
+	@param cmp The comparison operator to use. The comparison function is of form
+		int CmpFunc(const T &a, const T &b), and it tests the mutual order of a and b.
+		It should return -1 if a < b, +1 if a > b, and 0 if a == b.
+	@return The index where a matching element lies, or -1 if not found. Note that if there are more than
+	        one matching element, the first that is found is returned. */
+template<typename T>
+int ArrayBinarySearch(const T *list, int numItems, const T &value)
+{
+	int left = 0;
+	int right = numItems-1;
+	int order = list[left] - value;
+	if (order > 0) return -1;
+	if (order == 0) return left;
+
+	order = list[right] - value;
+	if (order < 0) return -1;
+	if (order == 0) return right;
+
+	int round = 0; // Counter to alternatingly round up or down.
+	do
+	{
+		int middle = (left + right + round) / 2;
+		round = (round+1)&1;
+		order = list[middle] - value;
+		if (order == 0)
+			return middle;
+		if (order < 0)
+			left = middle;
+		else right = middle;
+	} while(left < right);
+	return -1;
+}
+
+void RemoveRedundantVertices(Hull3 &hull)
+{
+	std::set<int> usedVertices;
+
+	// Gather all used vertices.
+	for(size_t i = 0; i < hull.f.size(); ++i)
+		for(size_t j = 0; j < hull.f[i].size(); ++j)
+			usedVertices.insert(hull.f[i][j]);
+
+	// Turn the used vertices set into a vector for random access.
+	std::vector<int> usedVerticesArray;
+	usedVerticesArray.reserve(usedVertices.size());
+	for(std::set<int>::iterator iter = usedVertices.begin(); iter != usedVertices.end(); ++iter)
+		usedVerticesArray.push_back(*iter);
+
+	// Shift all face indices to point to the new vertex array.
+	for(size_t i = 0; i < hull.f.size(); ++i)
+		for(size_t j = 0; j < hull.f[i].size(); ++j)
+		{
+			int oldIndex = hull.f[i][j];
+			int newIndex = ArrayBinarySearch(&usedVerticesArray[0], (int)usedVerticesArray.size(), oldIndex);
+			assert(newIndex != -1);
+			hull.f[i][j] = newIndex;
+		}
+
+	// Delete all unused vertices from the vertex array.
+	for(size_t i = 0; i < usedVerticesArray.size(); ++i)
+		hull.v[i] = hull.v[usedVerticesArray[i]];
+	hull.v.resize(usedVerticesArray.size());
+}
+
+int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool conservativeEnclose = true, float angleEpsilon = 1e-16f, float distanceEpsilon = 1e-8f)
+{
+	std::vector<vec3> faceNormals;
+	faceNormals.reserve(hull.f.size());
+
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		std::vector<int> &face = hull.f[i];
+		if (face.size() < 3)
+		{
+			hull.f.erase(hull.f.begin()+i);
+			--i;
+			continue;
+		}
+		/*
+		vec3 a = v[face.v[0]];
+		vec3 b = v[face.v[1]];
+		vec3 c = v[face.v[2]];
+		vec3 normal = (b-a).Cross(c-a);
+		normal.Normalize();
+		*/
+		faceNormals.push_back(PolyhedronFaceNormal(hull, (int)i));
+	}
+
+	std::vector<int> faceGroups(hull.f.size());
+	for(size_t i = 0; i < hull.f.size(); ++i)
+		faceGroups[i] = (int)i;
+
+	int numMerges = 0;
+	std::map<std::pair<int, int>, int> verticesToFaces;
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		std::vector<int> &face = hull.f[i];
+
+		int v0 = face.back();
+		for(size_t j = 0; j < face.size(); ++j)
+		{
+			int v1 = face[j];
+			verticesToFaces[std::make_pair(v0, v1)] = (int)i;
+			std::map<std::pair<int, int>, int>::iterator neighbor = verticesToFaces.find(std::make_pair(v1, v0));
+			if (neighbor != verticesToFaces.end())
+			{
+				int nf = neighbor->second;
+				if (!hull.f[nf].empty())
+				{
+					vec3 thisNormal = faceNormals[i];
+					vec3 nghbNormal = faceNormals[nf];
+					if (dot(thisNormal, nghbNormal) >= 1.0 - angleEpsilon)
+					{
+						float eNeg, ePos, nNeg, nPos;
+						PolyExtremeVertexOnFace(hull, (int)i, nghbNormal, eNeg, ePos);
+						PolyExtremeVertexOnFace(hull, nf, thisNormal, nNeg, nPos);
+						if (ePos - eNeg <= distanceEpsilon && nPos - nNeg <= distanceEpsilon)
+						{
+							++numMerges;
+							// Merge this face to neighboring face.
+							int fg = (int)i;
+							while(faceGroups[fg] != fg)
+								fg = faceGroups[fg];
+							int nfgr = nf;
+							while(faceGroups[nfgr] != nfgr)
+								nfgr = faceGroups[nfgr];
+							faceGroups[fg] = nfgr;
+							break;
+						}
+					}
+				}
+			}
+			v0 = v1;
+		}
+	}
+
+	std::vector<std::set<std::pair<int, int> > > newEdgesPerFace(hull.f.size());
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		std::vector<int> &face = hull.f[i];
+
+		int fg = (int)i;
+		while(faceGroups[fg] != fg)
+			fg = faceGroups[fg];
+
+		int v0 = face.back();
+		for(size_t j = 0; j < face.size(); ++j)
+		{
+			int v1 = face[j];
+
+			if (newEdgesPerFace[fg].find(std::make_pair(v1, v0)) != newEdgesPerFace[fg].end())
+			{
+				newEdgesPerFace[fg].erase(std::make_pair(v1, v0));
+			}
+			else
+			{
+				newEdgesPerFace[fg].insert(std::make_pair(v0, v1));
+			}
+
+			v0 = v1;
+		}
+	}
+
+	for(size_t i = 0; i < hull.f.size(); ++i)
+	{
+		std::vector<int> &face = hull.f[i];
+
+		std::vector<std::pair<int, int> > boundaryEdges(newEdgesPerFace[i].begin(), newEdgesPerFace[i].end());
+		for(size_t j = 0; j < boundaryEdges.size(); ++j)
+			for(size_t k = j+1; k < boundaryEdges.size(); ++k)
+				if (boundaryEdges[j].second == boundaryEdges[k].first)
+				{
+					std::swap(boundaryEdges[j+1], boundaryEdges[k]);
+					break;
+				}
+		face.clear();
+		for(size_t j = 0; j < boundaryEdges.size(); ++j)
+			face.push_back(boundaryEdges[j].first);
+
+		// Snap all vertices to the plane of the face.
+		if (snapVerticesToMergedPlanes)
+		{
+			// If conservativeEnclose == true, compute the maximum distance for the plane
+			// so it encloses all the points. Otherwise, compute the average.
+			float d = conservativeEnclose ? -FLT_MAX : 0;
+			for(size_t j = 0; j < face.size(); ++j)
+			{
+				int vtx = face[j];
+				if (conservativeEnclose)
+					d = fmaxf(d, dot(faceNormals[i], hull.v[vtx]));
+				else
+					d += dot(faceNormals[i], hull.v[vtx]);
+			}
+			if (!conservativeEnclose)
+				d /= (float)face.size();
+			for(size_t j = 0; j < face.size(); ++j)
+				hull.v[face[j]] += faceNormals[i] * (d - dot(faceNormals[i], hull.v[face[j]]));
+		}
+	}
+
+	RemoveDegenerateFaces(hull);
+	RemoveRedundantVertices(hull);
+
+	return numMerges;
+}
+
 static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
 	Hull3 hull;
@@ -860,7 +1132,9 @@ Hull3 convex_hull(float *pts, int num_pts, int stride_bytes)
 		return a.x == b.x && a.y == b.y && a.z == b.z;
 	}), points.end());
 
-	return ConvexHull3(points);
+	Hull3 hull = ConvexHull3(points);
+	merge_coplanar_faces(hull, true);
+	return hull;
 }
 
 // ----------------------------------------------------------------------------
@@ -1527,40 +1801,6 @@ int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > 
 	}
 	mostExtremeDistance = curD;
 	return startingVertex;
-}
-
-vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
-{
-	const std::vector<int> &face = poly.f[faceIndex];
-	if (face.size() == 3)
-	{
-		vec3 a = poly.v[face[0]];
-		vec3 b = poly.v[face[1]];
-		vec3 c = poly.v[face[2]];
-		return Normalized(cross(b-a, c-a));
-	}
-	else if (face.size() > 3)
-	{
-		// Use Newell's method of computing the face normal for best stability.
-		// See Christer Ericson, Real-Time Collision Detection, pp. 491-495.
-		vec3 normal(0, 0, 0);
-		int v0 = face.back();
-		for(size_t i = 0; i < face.size(); ++i)
-		{
-			int v1 = face[i];
-			normal.x += (double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z); // Project on yz
-			normal.y += (double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x); // Project on xz
-			normal.z += (double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y); // Project on xy
-			v0 = v1;
-		}
-		return Normalized(normal);
-	}
-	else if (face.size() == 2)
-		return Normalized(cross(poly.v[face[1]] - poly.v[face[0]], Perpendicular(poly.v[face[0]] - poly.v[face[1]]) - poly.v[face[0]]));
-	else if (face.size() == 1)
-		return vec3(0, 1, 0);
-	else
-		return vec3(__builtin_nan(0), __builtin_nan(0), __builtin_nan(0));
 }
 
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
