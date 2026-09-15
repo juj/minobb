@@ -8,11 +8,10 @@
 #include <set>
 #include <assert.h>
 
-// ----------------------------------------------------------------------------
-// vec3 and OBB implementations
-// ----------------------------------------------------------------------------
-
-float dot(const vec3 &a, const vec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+float dot(const vec3 &a, const vec3 &b)
+{
+	return a.x*b.x + a.y*b.y + a.z*b.z;
+}
 
 vec3 cross(const vec3 &a, const vec3 &b)
 {
