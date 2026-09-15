@@ -664,7 +664,7 @@ void RemoveRedundantVertices(Hull3 &hull)
 	hull.v.resize(usedVerticesArray.size());
 }
 
-int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool conservativeEnclose = true, float angleEpsilon = 1e-16f, float distanceEpsilon = 1e-8f)
+int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool conservativeEnclose = true, float angleEpsilon = 1e-4f, float distanceEpsilon = 1e-4f)
 {
 	std::vector<vec3> faceNormals;
 	faceNormals.reserve(hull.f.size());
@@ -698,11 +698,24 @@ int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool cons
 	{
 		std::vector<int> &face = hull.f[i];
 
+		// First register all of this face's edges, then test for merges. The
+		// merge below breaks out of the test loop; if registration and lookup
+		// were interleaved, the remaining edges would never be registered and
+		// later faces could not find this face as a coplanar neighbor through
+		// them (e.g. a triangle sharing an edge with the *last* edge of an
+		// already-merged face would be orphaned).
 		int v0 = face.back();
 		for(size_t j = 0; j < face.size(); ++j)
 		{
 			int v1 = face[j];
 			verticesToFaces[std::make_pair(v0, v1)] = (int)i;
+			v0 = v1;
+		}
+
+		v0 = face.back();
+		for(size_t j = 0; j < face.size(); ++j)
+		{
+			int v1 = face[j];
 			std::map<std::pair<int, int>, int>::iterator neighbor = verticesToFaces.find(std::make_pair(v1, v0));
 			if (neighbor != verticesToFaces.end())
 			{

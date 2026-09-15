@@ -37,6 +37,7 @@
   <div id="hudtext">loading...</div>
   <label id="lbl-object"><input type="checkbox" id="cb-object" checked> Show object</label>
   <label id="lbl-hull"><input type="checkbox" id="cb-hull" checked> Show Convex Hull</label>
+  <label id="lbl-hulltri"><input type="checkbox" id="cb-hulltri"> Show hull triangles (red)</label>
   <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB</label>
   <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB</label>
   <hr>
@@ -125,8 +126,10 @@ function drawHull(hull) {
   });
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  // Fan-triangulate every face: triangles as-is, n-gons as (f0, fi, fi+1).
   const idx = [];
-  for (const f of hull.faces) for (const i of f) idx.push(i);
+  for (const f of hull.faces)
+    for (let i = 1; i + 1 < f.length; ++i) idx.push(f[0], f[i], f[i+1]);
   geo.setIndex(idx);
   geo.computeVertexNormals();
   const group = new THREE.Group();
@@ -135,10 +138,42 @@ function drawHull(hull) {
   }));
   const edges = new THREE.LineSegments(
     new THREE.EdgesGeometry(geo, 1),
-    new THREE.LineBasicMaterial({ color: 0x33ccff, transparent: true, opacity: 0.7 })
+///    new THREE.LineBasicMaterial({ color: 0x33ccff, transparent: true, opacity: 0.7 })
   );
   group.add(mesh, edges);
   return group;
+}
+
+// Debug layer: draws the outline of EVERY individual triangle in the raw JSON
+// face data (n-gons fan-triangulated from vertex 0) as red lines. Unlike
+// EdgesGeometry (which only draws edges between non-coplanar triangles), this
+// also shows the internal edges of coplanar triangle fans. The lines are depth
+// tested against the visible geometry (occluded by the model), with a small
+// depth bias toward the viewer so they don't z-fight the coplanar hull surface.
+function drawHullTriangles(hull) {
+  const pos = [];
+  const push = (a, b) => {
+    pos.push(hull.vertices[a][0], hull.vertices[a][1], hull.vertices[a][2]);
+    pos.push(hull.vertices[b][0], hull.vertices[b][1], hull.vertices[b][2]);
+  };
+  for (const f of hull.faces) {
+    const k = f.length;
+    for (let i = 0; i < k; ++i)
+      push(f[i], f[(i+1) % k]);           // boundary edges
+    /*
+    if (k > 3)
+      for (let i = 2; i < k; ++i)
+        push(f[0], f[i]);                 // fan diagonals
+    */
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  const lines = new THREE.LineSegments(
+    geo, new THREE.LineBasicMaterial({ color: 0x33ccff, transparent: true, opacity: 0.7 }));
+  lines.material.polygonOffset = true;
+  lines.material.polygonOffsetFactor = -1;
+  lines.material.polygonOffsetUnits = -1;
+  return lines;
 }
 
 // Draws the axis-aligned box given by {min, max} (world space) as a group.
@@ -164,24 +199,29 @@ function drawAABB(aabb) {
   return group;
 }
 
-// Exact volume of a closed triangulated polyhedron (divergence theorem):
-// V = |sum over faces of det[a b c]| / 6.
+// Exact volume of a closed polyhedron (divergence theorem):
+// V = |sum over fan triangles of det[a b c]| / 6 (n-gon faces are
+// fan-triangulated from their first vertex).
 function polyhedronVolume(vertices, faces) {
   let vol = 0;
   for (const f of faces) {
-    const a = vertices[f[0]], b = vertices[f[1]], c = vertices[f[2]];
-    vol += a[0] * (b[1] * c[2] - b[2] * c[1])
-         - a[1] * (b[0] * c[2] - b[2] * c[0])
-         + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    const a = vertices[f[0]];
+    for (let i = 1; i + 1 < f.length; ++i) {
+      const b = vertices[f[i]], c = vertices[f[i+1]];
+      vol += a[0] * (b[1] * c[2] - b[2] * c[1])
+           - a[1] * (b[0] * c[2] - b[2] * c[0])
+           + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
   }
   return Math.abs(vol) / 6;
 }
 
 // Overlay groups, toggled by the checkboxes in the HUD panel.
-let hullGroup = null, obbGroup = null, aabbGroups = [];
+let hullGroup = null, hullTriLines = null, obbGroup = null, aabbGroups = [];
 
 const cbObject = document.getElementById('cb-object');
 const cbHull = document.getElementById('cb-hull');
+const cbHullTri = document.getElementById('cb-hulltri');
 const cbOBB = document.getElementById('cb-obb');
 const cbAABB = document.getElementById('cb-aabb');
 const cbDark = document.getElementById('cb-dark');
@@ -195,7 +235,8 @@ function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
       object: cbObject.checked,
-      hull: cbHull.checked, obb: cbOBB.checked, aabb: cbAABB.checked,
+      hull: cbHull.checked, hulltri: cbHullTri.checked,
+      obb: cbOBB.checked, aabb: cbAABB.checked,
       dark: cbDark.checked
     }));
   } catch (e) { /* storage unavailable (private mode etc.): ignore */ }
@@ -204,6 +245,7 @@ try {
   const prefs = JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
   if (typeof prefs.object === 'boolean') cbObject.checked = prefs.object;
   if (typeof prefs.hull === 'boolean') cbHull.checked = prefs.hull;
+  if (typeof prefs.hulltri === 'boolean') cbHullTri.checked = prefs.hulltri;
   if (typeof prefs.obb === 'boolean') cbOBB.checked = prefs.obb;
   if (typeof prefs.aabb === 'boolean') cbAABB.checked = prefs.aabb;
   if (typeof prefs.dark === 'boolean') cbDark.checked = prefs.dark;
@@ -221,6 +263,7 @@ cbDark.addEventListener('change', () => { applyTheme(); savePrefs(); });
 
 cbObject.addEventListener('change', () => { if (modelObj) modelObj.visible = cbObject.checked; savePrefs(); });
 cbHull.addEventListener('change', () => { if (hullGroup) hullGroup.visible = cbHull.checked; savePrefs(); });
+cbHullTri.addEventListener('change', () => { if (hullTriLines) hullTriLines.visible = cbHullTri.checked; savePrefs(); });
 cbOBB.addEventListener('change', () => { if (obbGroup) obbGroup.visible = cbOBB.checked; savePrefs(); });
 cbAABB.addEventListener('change', () => {
   for (const g of aabbGroups) g.visible = cbAABB.checked;
@@ -236,6 +279,7 @@ function fail(msg) {
   hudText.textContent = msg;
   bindCheckbox(cbObject, document.getElementById('lbl-object'), false);
   bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+  bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
   bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
   bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
 }
@@ -272,6 +316,9 @@ if (!url) {
             hullGroup = drawHull(data.hull);
             hullGroup.visible = cbHull.checked;
             parent.add(hullGroup);
+            hullTriLines = drawHullTriangles(data.hull);
+            hullTriLines.visible = cbHullTri.checked;
+            parent.add(hullTriLines);
           }
           let obbOk = false;
           // Note: h >= 0, not h > 0 — a valid OBB of a planar (or collinear)
@@ -298,6 +345,7 @@ if (!url) {
             aabbGroups.push(g);
           }
           bindCheckbox(cbHull, document.getElementById('lbl-hull'), !!hullGroup);
+          bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), !!hullTriLines);
           bindCheckbox(cbOBB, document.getElementById('lbl-obb'), !!obbGroup);
           bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), aabbGroups.length > 0);
 
@@ -326,12 +374,14 @@ if (!url) {
         } else {
           overlays = 'none (' + jsonUrl + ' -> HTTP ' + resp.status + ')';
           bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+          bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
           bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
           bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
         }
       } catch (e) {
         overlays = 'none (fetch failed: ' + e + ')';
         bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
+        bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
         bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
         bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
       }
