@@ -34,38 +34,33 @@ vec3 OBB::LocalToWorldInverse(const vec3 &p) const
 	return vec3(dot(axis[0], d), dot(axis[1], d), dot(axis[2], d));
 }
 
-float OBB::Distance(const vec3 &p) const
+static vec3 abs(const vec3 &p)
 {
-	vec3 q = LocalToWorldInverse(p);
-	float dx = q.x > r.x ? q.x - r.x : (q.x < -r.x ? -r.x - q.x : 0.f);
-	float dy = q.y > r.y ? q.y - r.y : (q.y < -r.y ? -r.y - q.y : 0.f);
-	float dz = q.z > r.z ? q.z - r.z : (q.z < -r.z ? -r.z - q.z : 0.f);
-	return (dx*dx > 0.f || dy*dy > 0.f || dz*dz > 0.f)
-		? (float)std::sqrt((double)dx*dx + (double)dy*dy + (double)dz*dz) : 0.f;
+	return vec3(fabsf(p.x), fabsf(p.y), fabsf(p.z));
 }
 
-// ----------------------------------------------------------------------------
-// Small math helpers
-// ----------------------------------------------------------------------------
-
-// Maximum of the three components (horizontal max).
-static inline float hmax(const vec3 &v) { return fmaxf(v.x, fmaxf(v.y, v.z)); }
-// Same semantics as MathGeoLib's EqualAbs(): |a - b| < epsilon (default 1e-4).
-static inline bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
+static vec3 Max(const vec3 &a, const vec3 &b)
+{
+	return vec3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+}
 
 static float LengthSq(const vec3 &v) { return dot(v, v); }
+static float hmax(const vec3 &v) { return fmaxf(v.x, fmaxf(v.y, v.z)); }
+static bool EqualAbs(float a, float b, float epsilon = 1e-4f) { return fabsf(a - b) < epsilon; }
+
+float OBB::Distance(const vec3 &p) const
+{
+	return sqrtf(LengthSq(Max(abs(LocalToWorldInverse(p)) - r, vec3(0,0,0))));
+}
 
 // Normalizes the vector in place, returns the original length.
 static float Normalize(vec3 &v)
 {
 	float lenSq = LengthSq(v);
-	if (lenSq > 0.f)
-	{
-		float len = (float)sqrt((double)lenSq);
-		float inv = 1.f / len;
-		v *= inv;
-	}
-	return (float)sqrt((double)lenSq);
+	if (lenSq == 0.f) return 0.f;
+	float len = sqrtf(lenSq);
+	v *= 1.f / len;
+	return len;
 }
 
 static vec3 Normalized(const vec3 &v)
@@ -75,19 +70,16 @@ static vec3 Normalized(const vec3 &v)
 	return u;
 }
 
-// A vector perpendicular to this one (this one must not be near-zero).
 static vec3 Perpendicular(const vec3 &v)
 {
 	// Choose the smallest magnitude component and cross with the corresponding unit axis.
-	const float ax = fabsf(v.x), ay = fabsf(v.y), az = fabsf(v.z);
-	vec3 dir = (ax < ay && ax < az) ? vec3(1.f, 0.f, 0.f) :
-	           (ay < az)           ? vec3(0.f, 1.f, 0.f) : vec3(0.f, 0.f, 1.f);
-	return cross(dir, v);
+	const vec3 a = abs(v);
+	float x = (float)(a.x < a.y && a.x < a.z);
+	float y = (float)(a.y <= a.x && a.y < a.z);
+	float z = (float)(a.z <= a.x && a.z <= a.y);
+	return cross(vec3(x, y, z), v);
 }
 
-// Computes an orthonormal basis (outU, outV) perpendicular to this vector
-// (this vector must be normalized). Same semantics as MathGeoLib's
-// vec3::PerpendicularBasis().
 static void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
 {
 	outU = Normalized(Perpendicular(v));
@@ -112,7 +104,7 @@ struct float2
 	float2 Rotated90CW() const { return float2(y, -x); }
 };
 
-static inline float2 operator - (const float2 *a, const float2 &b) { return *a - b; }
+static float2 operator - (const float2 *a, const float2 &b) { return *a - b; }
 
 // Computes the convex hull of the points in place (returns it in the first
 // n' elements, CCW oriented, no collinear or duplicate points).
@@ -292,15 +284,15 @@ struct dvec3
 {
 	double x, y, z;
 };
-static inline dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
-static inline dvec3 dmul(const dvec3 &a, double s) { return dvec3{a.x * s, a.y * s, a.z * s}; }
-static inline double ddot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-static inline dvec3 dcross(const dvec3 &a, const dvec3 &b)
+static dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
+static dvec3 dmul(const dvec3 &a, double s) { return dvec3{a.x * s, a.y * s, a.z * s}; }
+static double ddot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static dvec3 dcross(const dvec3 &a, const dvec3 &b)
 {
 	return dvec3{a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x};
 }
-static inline double dlen2(const dvec3 &a) { return ddot(a, a); }
-static inline dvec3 dnormalize(const dvec3 &a)
+static double dlen2(const dvec3 &a) { return ddot(a, a); }
+static dvec3 dnormalize(const dvec3 &a)
 {
 	double l = std::sqrt(dlen2(a));
 	return l > 0.0 ? dmul(a, 1.0 / l) : dvec3{0.0, 0.0, 0.0};
@@ -1069,7 +1061,7 @@ static OBB CoarseSweepEnclosingOBB(const std::vector<vec3> &pts)
 }
 
 // Moves the floating point sign bit from src to dst.
-static inline void MoveSign(float &dst, float &src)
+static void MoveSign(float &dst, float &src)
 {
 	if (src < 0.f)
 	{
