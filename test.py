@@ -107,6 +107,21 @@ def t_contcheck():
         log(out)
 
 
+def t_glb():
+    """GLB pipeline: recompute hull/OBB for all GLBs, compare volumes to the
+    reference .json files (see test_glb.py)."""
+    script = os.path.join(ROOT, "test_glb.py")
+    if not os.path.exists(script):
+        record("glb", False, "test_glb.py not found", 0.0)
+        return
+    rc, out, dur = run([sys.executable, script], timeout=3600)
+    m = re.search(r"(\d+)/(\d+) GLBs passed", out)
+    ok = rc == 0 and "FAILED" not in out
+    record("glb", ok, m.group(0) if m else ("ok" if ok else "see output"), dur)
+    if not ok:
+        log(out)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -123,6 +138,7 @@ def main():
     t_testobb()
     t_repro_minimal()
     t_contcheck()
+    t_glb()
 
     nfail = sum(1 for _, ok, _, _ in results if not ok)
     log(f"\n{len(results) - nfail}/{len(results)} tests passed")

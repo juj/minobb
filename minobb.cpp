@@ -2092,20 +2092,18 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3 &dir0, const vec3 &dir1)
 {
 	int d0, d1;
-	float mind0, maxd0, mind1, maxd1, mind2, maxd2;
-	ExtremePointsAlongDirection(pointArray, dir0, d0, d1, mind0, maxd0);
-	ExtremePointsAlongDirection(pointArray, dir1, d0, d1, mind1, maxd1);
+	vec3 mindir, maxdir;
+	ExtremePointsAlongDirection(pointArray, dir0, d0, d1, mindir.x, maxdir.x);
+	ExtremePointsAlongDirection(pointArray, dir1, d0, d1, mindir.y, maxdir.y);
 	vec3 edgeC = Normalized(cross(dir0, dir1));
-	ExtremePointsAlongDirection(pointArray, edgeC, d0, d1, mind2, maxd2);
-	float rd0 = (maxd0 - mind0) * 0.5f;
-	float rd1 = (maxd1 - mind1) * 0.5f;
-	float rd2 = (maxd2 - mind2) * 0.5f;
+	ExtremePointsAlongDirection(pointArray, edgeC, d0, d1, mindir.z, maxdir.z);
+	vec3 center = (mindir + maxdir) * 0.5f;
 	OBB minOBB;
-	minOBB.pos = dir0 * (mind0 + rd0) + dir1 * (mind1 + rd1) + edgeC * (mind2 + rd2);
+	minOBB.pos = dir0*center.x + dir1*center.y + edgeC*center.z;
 	minOBB.axis[0] = dir0;
 	minOBB.axis[1] = dir1;
 	minOBB.axis[2] = edgeC;
-	minOBB.r = vec3(rd0, rd1, rd2);
+	minOBB.r = center - mindir;
 	return minOBB;
 }
 
