@@ -1331,6 +1331,40 @@ int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > 
 	return startingVertex;
 }
 
+vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
+{
+	const std::vector<int> &face = poly.f[faceIndex];
+	if (face.size() == 3)
+	{
+		vec3 a = poly.v[face[0]];
+		vec3 b = poly.v[face[1]];
+		vec3 c = poly.v[face[2]];
+		return Normalized(cross(b-a, c-a));
+	}
+	else if (face.size() > 3)
+	{
+		// Use Newell's method of computing the face normal for best stability.
+		// See Christer Ericson, Real-Time Collision Detection, pp. 491-495.
+		vec3 normal(0, 0, 0);
+		int v0 = face.back();
+		for(size_t i = 0; i < face.size(); ++i)
+		{
+			int v1 = face[i];
+			normal.x += (double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z); // Project on yz
+			normal.y += (double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x); // Project on xz
+			normal.z += (double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y); // Project on xy
+			v0 = v1;
+		}
+		return Normalized(normal);
+	}
+	else if (face.size() == 2)
+		return Normalized(cross(poly.v[face[1]] - poly.v[face[0]], Perpendicular(poly.v[face[0]] - poly.v[face[1]]) - poly.v[face[0]]));
+	else if (face.size() == 1)
+		return vec3(0, 1, 0);
+	else
+		return vec3(__builtin_nan(0), __builtin_nan(0), __builtin_nan(0));
+}
+
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
 static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
@@ -1369,7 +1403,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	for(int i = 0; i < F; ++i) // O(F)
 	{
 		if (hull.f[i].size() < 3) return minOBB; // Degenerate face, cannot process.
-		faceNormals[i] = Normalized(cross(vtx[hull.f[i][1]] - vtx[hull.f[i][0]], vtx[hull.f[i][2]] - vtx[hull.f[i][0]]));
+		faceNormals[i] = PolyhedronFaceNormal(hull, i);
 	}
 
 	// For each edge i, specifies the two vertices v0 and v1 through which that edge goes.
@@ -1413,26 +1447,6 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Throughout the algorithm, internal edges can all be discarded, so provide a helper macro to test for that.
 #define IS_INTERNAL_EDGE(i) (dot(faceNormals[facesForEdge[i].first], faceNormals[facesForEdge[i].second]) > 1.f - 1e-4f)
 	const int E = (int)edges.size();
-/*
-	for (int i = 0; i < V; ++i)
-		for (int j = i + 1; j < V; ++j)
-			if (vertexPairsToEdges[i * V + j] != EMPTY_EDGE)
-			{
-				adjacencyData[i].push_back(j);
-				adjacencyData[j].push_back(i);
-			}
-
-	// Throughout the algorithm, internal edges can all be discarded, so provide a helper
-	// to test for that (edges inside faces with ~180 degree dihedral angle, or edges
-	// adjacent to fewer than two faces).
-	auto isInternalEdge = [&](int i) -> bool
-	{
-		const std::pair<int, int> &ff = facesForEdge[i];
-		if (ff.second < 0)
-			return true; // Should not happen for a closed hull.
-		return dot(faceNormals[ff.first], faceNormals[ff.second]) > 1.f - 1e-4f;
-	};
-*/
 
 	// Throughout the whole algorithm, this array stores an auxiliary structure for performing graph searches
 	// on the vertices of the convex hull. Conceptually each index of the array stores a boolean whether we
@@ -1508,43 +1522,13 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Stores a memory of yet unvisited vertices for current graph search.
 	std::vector<int> traverseStack;
 
-#ifdef NAIVE_ANTIPODAL_SEARCH
-	// A naive O(E*V) algorithm for computing all antipodal points for each edge.
-	for (int i = 0; i < E; ++i)
-	{
-		// Skip internal (numerically coplanar) edges: when f1a == f1b the
-		// antipodal predicate degenerates and misclassifies the edge's own
-		// endpoints as antipodal, which the original code interprets as
-		// "degenerate planar input" and bails out. The original's graph search
-		// never reaches these vertices, and the lists of internal edges are
-		// never used downstream (all category loops skip internal edges).
-		if (isInternalEdge(i))
-			continue;
-		vec3 f1a = faceNormals[facesForEdge[i].first];
-		vec3 f1b = faceNormals[facesForEdge[i].second];
-		for (int j = 0; j < V; ++j)
-			if (IsVertexAntipodalToEdge(vtx, j, adjacencyData[j], f1a, f1b))
-			{
-				if (edges[i].first == j || edges[i].second == j)
-				{
-					// Edge is antipodal to a vertex of the same edge. This should be
-					// possible only if the input is degenerate planar. Return an
-					// invalid OBB; the caller then computes a planar box on the source
-					// input set.
-					return minOBB;
-				}
-				antipodalPointsForEdge[i].push_back(j);
-			}
-	}
-#endif
-
 	// Since we do several extreme vertex searches, and the search directions have a lot of spatial locality,
 	// always start the search for the next extreme vertex from the extreme vertex that was found during the
 	// previous iteration for the previous edge. This has been profiled to improve overall performance by as
 	// much as 15-25%.
 	int startingVertex = 0;
 
-#ifndef NAIVE_ANTIPODAL_SEARCH
+//#ifndef NAIVE_ANTIPODAL_SEARCH
 
 	// Precomputation: for each edge, we need to compute the list of potential antipodal points (points on
 	// the opposing face of an enclosing OBB of the face that is flush with the given edge of the polyhedron).
@@ -1611,7 +1595,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 //			antipodalPointsForEdge[i].push_back(startingVertex);
 		}
 	}
-#endif
+//#endif
 
 	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with.
 	std::vector<std::vector<int>> compatibleEdges(E);
@@ -1619,35 +1603,6 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Use an O(E*V) data structure for sidepodal vertices.
 	std::vector<unsigned char> sidepodalVertices((size_t)E * V, 0);
 
-// Enable this to perform a dumb search for sidepodal edges. Makes sense mostly for debugging the behavior of the smarter version.
-//#define NAIVE_SIDEPODAL_SEARCH
-
-#ifdef NAIVE_SIDEPODAL_SEARCH
-	// Precomputation: Compute all potential companion edges for each edge.
-	// This is O(E^2)
-	// Important! And edge can be its own companion edge! So have each edge test itself during iteration.
-	for (int i = 0; i < E; ++i)
-	{
-		vec3 f1a = faceNormals[facesForEdge[i].first];
-		vec3 f1b = faceNormals[facesForEdge[i].second];
-		for (int j = i; j < E; ++j)
-		{
-			if (!AreEdgesCompatibleForOBB(f1a, f1b, faceNormals[facesForEdge[j].first], faceNormals[facesForEdge[j].second]))
-				continue;
-			if (!isInternalEdge(i))
-				compatibleEdges[i].push_back(j);
-			sidepodalVertices[i * V + edges[j].first] = 1;
-			sidepodalVertices[i * V + edges[j].second] = 1;
-			if (i != j)
-			{
-				if (!isInternalEdge(j))
-					compatibleEdges[j].push_back(i);
-				sidepodalVertices[j * V + edges[i].first] = 1;
-				sidepodalVertices[j * V + edges[i].second] = 1;
-			}
-		}
-	}
-#else
 	// Compute all sidepodal edges for each edge by performing a graph search. The set of sidepodal edges is
 	// connected in the graph, which lets us avoid having to iterate over each edge pair of the convex hull.
 	// Total running time is O(E*sqrtE).
@@ -1720,7 +1675,6 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			}
 		}
 	}
-#endif
 
 	// Take advantage of spatial locality: start the search for the extreme vertex from the extreme vertex
 	// that was found during the previous iteration for the previous edge. This speeds up the search since
