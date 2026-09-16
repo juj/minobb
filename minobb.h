@@ -126,4 +126,4 @@ struct Hull3
 // collinear, or there are fewer than 4 distinct points. For planar input the
 // hull is the 2D convex polygon of the point set (flat, zero volume); for
 // collinear input it is the diameter segment; for a single point, the point.
-Hull3 convex_hull(float *pts, int num_pts, int stride_bytes);
+Hull3 convex_hull(const float *pts, int num_pts, int stride_bytes);

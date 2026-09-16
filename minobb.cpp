@@ -826,33 +826,19 @@ static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 {
 	double t0 = TRACE_START();
 	Hull3 hull;
-	if (ptsIn.empty())
+	const int n = (int)ptsIn.size();
+	if (n == 0)
 	{
 		hull.degenerate = true;
 		return hull;
 	}
-
-	// Remove exact duplicates.
-	std::vector<vec3> pts = ptsIn;
-	std::sort(pts.begin(), pts.end(), [](const vec3 &a, const vec3 &b)
-	{
-		if (a.x != b.x) return a.x < b.x;
-		if (a.y != b.y) return a.y < b.y;
-		return a.z < b.z;
-	});
-	pts.erase(std::unique(pts.begin(), pts.end(), [](const vec3 &a, const vec3 &b)
-	{
-		return a.x == b.x && a.y == b.y && a.z == b.z;
-	}), pts.end());
-
-	const int n = (int)pts.size();
 
 	// Convert all input points to double precision and calculate model scale.
 	std::vector<dvec3> P((size_t)n);
 	double scale = 1.0;
 	for (int i = 0; i < n; ++i)
 	{
-		P[i] = pts[i];
+		P[i] = ptsIn[i];
 		scale = std::max(scale, dlen2(P[i]));
 	}
 	TRACE_MARK(t0, "hull: dedup+sort+dvec3");
@@ -1104,16 +1090,15 @@ static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 	return hull;
 }
 
-Hull3 convex_hull(float *pts, int num_pts, int stride_bytes)
+Hull3 convex_hull(const float *pts, int num_pts, int stride_bytes)
 {
 	if (!pts || num_pts <= 0 || stride_bytes < 12)
 		return Hull3(); // Degenerate (no vertices, no faces).
 
 	// Copy the (possibly strided) input into a contiguous array, removing
-	// exact duplicates (BuildHull3Core does the same, but keep the contract
-	// explicit at the API boundary).
+	// exact duplicates.
 	std::vector<vec3> points;
-	points.reserve((size_t)num_pts);
+	points.reserve(num_pts);
 	for (int i = 0; i < num_pts; ++i)
 	{
 		const float *p = (const float *)pts + (size_t)i * (stride_bytes / 4);
