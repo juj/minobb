@@ -554,9 +554,9 @@ vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
 		for(size_t i = 0; i < face.size(); ++i)
 		{
 			int v1 = face[i];
-			normal.x += (double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z); // Project on yz
-			normal.y += (double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x); // Project on xz
-			normal.z += (double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y); // Project on xy
+			normal.x += (float)((double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z)); // Project on yz
+			normal.y += (float)((double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x)); // Project on xz
+			normal.z += (float)((double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y)); // Project on xy
 			v0 = v1;
 		}
 		return Normalized(normal);
@@ -2478,12 +2478,14 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			minN1 = FLT_MAX;
 			for(size_t j = 0; j < antipodals.size(); ++j)
 				minN1 = fminf(minN1, dot(n1, hull.v[antipodals[j]]));
+			if (maxN1 < minN1) std::swap(minN1, maxN1); // XXX Numerical stability hack
 		}
 		else
 		{
 			CLEAR_GRAPH_SEARCH();
 			extremeVertexSearchHint4 = ExtremeVertexConvex(hull, adjacencyData, -n1, floodFillVisited, floodFillVisitColor, minN1, extremeVertexSearchHint4); // O(logV)?
 			minN1 = -minN1;
+			if (maxN1 < minN1) std::swap(minN1, maxN1); // XXX Numerical stability hack
 		}
 
 		for(size_t j = 0; j < compatibleEdgesI.size(); ++j)
@@ -2523,6 +2525,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				CLEAR_GRAPH_SEARCH();
 				extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, extremeVertexSearchHint2); // O(logV)?
 				minN2 = -minN2;
+				if (maxN2 < minN2) std::swap(minN2, maxN2); // XXX Numerical stability hack
 				float maxN3 = dot(n3, hull.v[edges[edge3].first]);
 
 				const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edge3];
@@ -2531,6 +2534,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				{
 					for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
 						minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
+					if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
 				}
 				else
 				{
@@ -2538,6 +2542,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 					CLEAR_GRAPH_SEARCH();
 					extremeVertexSearchHint3 = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, extremeVertexSearchHint3); // O(logV)?
 					minN3 = -minN3;
+					if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
 				}
 
 				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);

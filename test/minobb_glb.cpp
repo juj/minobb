@@ -15,9 +15,10 @@
 //
 // Only dependencies: the C++ standard library and minobb.{h,cpp}.
 
-#include "minobb.h"
-
 #define NOMINMAX
+#define _CRT_SECURE_NO_WARNINGS
+
+#include "minobb.h"
 #include <windows.h>
 #include <cmath>
 #include <cstdint>
