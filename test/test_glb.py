@@ -28,7 +28,7 @@ GLB_DIR = os.path.join(TEST_DIR, "glb")
 TMP_DIR = os.path.join(ROOT, "tmp")
 GLBTEST_DIR = os.path.join(TMP_DIR, "glbtest")
 
-CXX = shutil.which("g++") or "g++"
+CXX = shutil.which("clang++") or "clang++"
 REL_TOL = 1e-6          # volumes round-trip through JSON with 9 significant digits
 TIMEOUT = 300.0         # per-GLB timeout in seconds
 

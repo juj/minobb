@@ -23,8 +23,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TEST_DIR = os.path.join(ROOT, "test")
 TMP_DIR = os.path.join(ROOT, "tmp")
 
-CXX = shutil.which("g++") or "g++"
-CXXFLAGS = ["-O2"]
+CXX = shutil.which("clang++") or "clang++"
+CXXFLAGS = ["-O3"]
 
 results = []
 

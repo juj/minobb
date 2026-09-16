@@ -27,7 +27,7 @@ GLB_DIR = os.path.join(REPO_ROOT, "test", "glb")
 EXE = os.path.join(REPO_ROOT, "test", "minobb_glb.exe")
 
 BUILD_CMD = [
-    "g++", "-O2", "-std=c++17", "-I.",
+    "clang++", "-O3", "-std=c++17", "-I.",
     "-o", os.path.join("test", "minobb_glb.exe"),
     "minobb.cpp", os.path.join("test", "minobb_glb.cpp"),
 ]

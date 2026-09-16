@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // Optional per-stage profiling.
 //
-// Compile with PERF_TRACING_ENABLED defined (e.g. g++ -DPERF_TRACING_ENABLED)
+// Compile with PERF_TRACING_ENABLED defined (e.g. clang++ -DPERF_TRACING_ENABLED)
 // to instrument the hot code paths with stage timers and loop counters. The
 // collected numbers are printed to stderr when the MINOBB_TRACE environment
 // variable is set (so a single binary can be switched on and off at run time).

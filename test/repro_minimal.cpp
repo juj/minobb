@@ -23,7 +23,7 @@
 // incremental hull drops pB instead of keeping pD, and its category search
 // is also suboptimal on the resulting tetrahedron).
 //
-// Build:  g++ -O2 -I. repro_minimal.cpp -o repro_minimal.exe
+// Build:  clang++ -O3 -I. repro_minimal.cpp -o repro_minimal.exe
 #include <cstdio>
 #include <vector>
 #include <cmath>
