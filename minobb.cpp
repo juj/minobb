@@ -367,14 +367,17 @@ static float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDi
 // input points, so the conversion is exact).
 struct dvec3
 {
+	dvec3() = default;
+	dvec3(double x, double y, double z):x(x), y(y), z(z) {}
+	dvec3(const vec3 &v):x(v.x), y(v.y), z(v.z) {}
 	double x, y, z;
 };
-static dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
-static dvec3 dmul(const dvec3 &a, double s) { return dvec3{a.x * s, a.y * s, a.z * s}; }
+static dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3(a.x - b.x, a.y - b.y, a.z - b.z); }
+static dvec3 dmul(const dvec3 &a, double s) { return dvec3(a.x * s, a.y * s, a.z * s); }
 static double ddot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 static dvec3 dcross(const dvec3 &a, const dvec3 &b)
 {
-	return dvec3{a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x};
+	return dvec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
 }
 static double dlen2(const dvec3 &a) { return ddot(a, a); }
 static dvec3 dnormalize(const dvec3 &a)
@@ -821,8 +824,13 @@ int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool cons
 
 static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 {
-	Hull3 hull;
 	double t0 = TRACE_START();
+	Hull3 hull;
+	if (ptsIn.empty())
+	{
+		hull.degenerate = true;
+		return hull;
+	}
 
 	// Remove exact duplicates.
 	std::vector<vec3> pts = ptsIn;
@@ -836,22 +844,19 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	{
 		return a.x == b.x && a.y == b.y && a.z == b.z;
 	}), pts.end());
-	const int n = (int)pts.size();
-	if (n == 0)
-	{
-		hull.degenerate = true;
-		return hull;
-	}
 
-	// Work in double precision (see dvec3 above).
+	const int n = (int)pts.size();
+
+	// Convert all input points to double precision and calculate model scale.
 	std::vector<dvec3> P((size_t)n);
 	double scale = 1.0;
 	for (int i = 0; i < n; ++i)
 	{
-		P[i] = dvec3{(double)pts[i].x, (double)pts[i].y, (double)pts[i].z};
-		scale = std::max(scale, std::sqrt(dlen2(P[i])));
+		P[i] = pts[i];
+		scale = std::max(scale, dlen2(P[i]));
 	}
 	TRACE_MARK(t0, "hull: dedup+sort+dvec3");
+	scale = std::sqrt(scale);
 	const double eps = 1e-6 * scale; // Coplanarity tolerance (true distance).
 
 	// Robust bootstrap: a well-conditioned tetrahedron. Take a lexicographic
