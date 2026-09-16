@@ -17,6 +17,7 @@
 
 #include "minobb.h"
 
+#define NOMINMAX
 #include <windows.h>
 #include <cmath>
 #include <cstdint>

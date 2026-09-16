@@ -566,7 +566,7 @@ vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
 	else if (face.size() == 1)
 		return vec3(0, 1, 0);
 	else
-		return vec3(__builtin_nan(0), __builtin_nan(0), __builtin_nan(0));
+		return vec3(std::nanf(""), std::nanf(""), std::nanf(""));
 }
 
 static void PolyExtremeVertexOnFace(const Hull3 &poly, int face, const vec3 &dir, float &outMin, float &outMax)
