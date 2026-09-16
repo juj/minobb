@@ -822,7 +822,7 @@ int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool cons
 	return numMerges;
 }
 
-static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
+static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
 {
 	double t0 = TRACE_START();
 	Hull3 hull;
@@ -1102,17 +1102,6 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 		hull.v.push_back(vec3((float)hv[i].x, (float)hv[i].y, (float)hv[i].z));
 	hull.f = std::move(hf);
 	return hull;
-}
-
-static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
-{
-	// Note: MathGeoLib's Polyhedron::ConvexHull is an incremental algorithm whose
-	// exact vertex set for nearly-degenerate inputs is path-dependent (initial
-	// tetrahedron from 14 fixed directions + RNG-ordered conflict processing with
-	// inPlaneEpsilon = 1e-4). We build the exact hull of the input instead; for
-	// well-conditioned point sets (the intended use case) the two agree, and the
-	// OBB search below is robust to the extra nearly-coplanar vertices.
-	return BuildHull3Core(ptsIn);
 }
 
 Hull3 convex_hull(float *pts, int num_pts, int stride_bytes)
