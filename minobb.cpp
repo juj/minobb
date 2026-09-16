@@ -859,17 +859,8 @@ static Hull3 BuildHull3Core(const std::vector<vec3> &ptsIn)
 	scale = std::sqrt(scale);
 	const double eps = 1e-6 * scale; // Coplanarity tolerance (true distance).
 
-	// Robust bootstrap: a well-conditioned tetrahedron. Take a lexicographic
-	// extreme point, a near-diameter partner (two farthest-point rounds), the
-	// point farthest from that line, and the point farthest from the plane
-	// through the three. All O(n). The original "first non-degenerate
-	// tetrahedron" choice is nearly degenerate for thin/curved point clouds and
-	// makes the incremental construction numerically unstable.
 	int ia = 0;
-	for (int i = 1; i < n; ++i)
-		if (P[i].x < P[ia].x || (P[i].x == P[ia].x &&
-		    (P[i].y < P[ia].y || (P[i].y == P[ia].y && P[i].z < P[ia].z))))
-			ia = i;
+
 	auto farthestFrom = [&](int from)
 	{
 		int best = -1;
