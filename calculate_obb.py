@@ -76,6 +76,8 @@ def compute_one(glb_path: str, timeout: float):
             total = None
         return (glb_path, "ok", total)
     except subprocess.TimeoutExpired:
+#        print(f'TIMEOUT, DELETING {glb_path}')
+#        os.remove(glb_path)
         return (glb_path, f"timeout (> {timeout:.0f}s)", None)
     except OSError as e:
         return (glb_path, f"error ({e})", None)
