@@ -3,6 +3,7 @@
 computation times (convex hull against the number of input vertices, OBB
 against the number of hull vertices), and below them a table of the files with
 links to view.html?url=<relative path>. A point of a plot opens the same link.
+The table can be sorted by any of its columns, by clicking the column header.
 
 The numbers come from the sibling <name>.json of each .glb, which
 calculate_obb.py writes. Run from the repo root: python build_index.py"""
@@ -57,7 +58,8 @@ def main() -> None:
                 files.append((p, load_entry(p)))
 
     # Sort by total generation time, slowest first; entries without timing
-    # info (no .json) go last, alphabetically.
+    # info (no .json) go last, alphabetically. (This is the order of the table
+    # until a column header is clicked, and the order that ties fall back to.)
     def sort_key(item):
         p, e = item
         if e is None:
@@ -162,7 +164,17 @@ PAGE = r"""<!DOCTYPE html>
   .tip .hint { color: var(--muted); }
 
   table { border-collapse: collapse; }
-  th { text-align: right; font-weight: normal; font-size: 12px; color: var(--muted); padding: 2px 10px; border-bottom: 1px solid var(--axis); }
+  th { text-align: right; font-weight: normal; font-size: 12px; color: var(--muted); padding: 2px 10px; border-bottom: 1px solid var(--axis); white-space: nowrap; }
+  /* A column header sorts the table. Its arrow always takes up its space, so that nothing moves when it shows:
+     after the name of a column of text, and before the name of a column of numbers, which ends where they do. */
+  th button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+  th button:hover, th[aria-sort] button { color: var(--ink); }
+  th button::before, th button::after { visibility: hidden; }
+  th[aria-sort] button::before, th[aria-sort] button::after { visibility: visible; }
+  th:nth-child(-n+2) button::after { content: " ▲"; }
+  th:nth-child(n+3) button::before { content: "▲ "; }
+  th[aria-sort="descending"]:nth-child(-n+2) button::after { content: " ▼"; }
+  th[aria-sort="descending"]:nth-child(n+3) button::before { content: "▼ "; }
   td { text-align: right; padding: 2px 10px; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; padding-left: 0; }
   th:nth-child(2), td:nth-child(2) { text-align: left; }
@@ -192,7 +204,14 @@ PAGE = r"""<!DOCTYPE html>
   </figure>
 </div>
 <table id="files">
-  <thead><tr><th>File</th><th>Folder</th><th>Input vertices</th><th>Hull vertices</th><th>Hull time</th><th>OBB time</th></tr></thead>
+  <thead><tr>
+    <th><button type="button" title="Sort by file name">File</button></th>
+    <th><button type="button" title="Sort by folder">Folder</button></th>
+    <th><button type="button" title="Sort by the number of input vertices">Input vertices</button></th>
+    <th><button type="button" title="Sort by the number of hull vertices">Hull vertices</button></th>
+    <th><button type="button" title="Sort by convex hull time">Hull time</button></th>
+    <th><button type="button" title="Sort by minimum OBB time">OBB time</button></th>
+  </tr></thead>
   <tbody>
 @ROWS@
   </tbody>
@@ -547,6 +566,41 @@ PAGE = r"""<!DOCTYPE html>
   const body = document.querySelector('#files tbody');
   body.addEventListener('mouseover', e => { const tr = e.target.closest('tr[data-i]'); setHover(tr ? Number(tr.dataset.i) : -1, null); });
   body.addEventListener('mouseleave', () => setHover(-1, null));
+
+  // ---- A click on a column header sorts the table by that column, and another click reverses the order.
+  // The rows as generated are in the order of their total time, the slowest first: rows that tie stay in that
+  // order. Rows that have no value in the column (not computed, or no box) come last either way.
+  const SORT_STORE = 'glb-sort';
+  const generated = Array.from(body.rows), headers = Array.from(document.querySelectorAll('#files thead th'));
+  const text = column => tr => tr.cells[column].textContent.toLowerCase();
+  const number = field => tr => tr.dataset.i === undefined ? null : rows[tr.dataset.i][field];
+  const sortKeys = [text(0), text(1), number(POINTS), number(HULL), number(HULL_SEC), number(OBB_SEC)];
+  function sortBy(column, descending) {
+    const keys = new Map(generated.map(tr => [tr, sortKeys[column](tr)]));
+    const sorted = generated.slice().sort((a, b) => {
+      const x = keys.get(a), y = keys.get(b);
+      if (x === null || y === null) return (x === null) - (y === null);
+      return (x < y ? -1 : x > y ? 1 : 0) * (descending ? -1 : 1);
+    });
+    body.append(...sorted);
+    headers.forEach((th, i) => {
+      if (i === column) th.setAttribute('aria-sort', descending ? 'descending' : 'ascending');
+      else th.removeAttribute('aria-sort');
+    });
+    try {
+      sessionStorage.setItem(SORT_STORE, JSON.stringify({ column, descending }));
+    } catch (e) { /* The order is just not remembered then. */ }
+  }
+  headers.forEach((th, column) => th.querySelector('button').addEventListener('click', () => {
+    // The first click sorts names from A to Z, and numbers from the largest down.
+    const order = th.getAttribute('aria-sort');
+    sortBy(column, order ? order === 'ascending' : column >= 2);
+  }));
+  // Coming back from the viewer, show the table as it was left.
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(SORT_STORE));
+    if (saved && Number.isInteger(saved.column) && saved.column >= 0 && saved.column < headers.length) sortBy(saved.column, !!saved.descending);
+  } catch (e) { /* Nothing usable was saved. */ }
 })();
 </script>
 </body>
