@@ -1508,13 +1508,20 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		smallestMinWidth = std::min(smallestMinWidth, minWidth[e]);
 	}
 
+	// Whether to compute the volume bounds of the edges, see below. That pays off only if the hull has enough
+	// edges: the bounds take time to compute, and the edges of a small hull have few sidepodal edges to rule out.
+	const bool boundVolumes = spatialEdgeOrder.size() >= 96;
+
 	// Take advantage of spatial locality: start the search for the extreme vertex along a direction from the
 	// extreme vertex that an earlier search along a similar direction found. For that, the directions are
 	// divided into cells (the six faces of a cube, each cut into a grid of squares), and for each cell the
 	// vertex is stored that the last search along a direction of the cell ended at. As that vertex is far
 	// along the other directions of the cell too, it also gives a lower bound for how far the hull extends
 	// along them, without any search.
-	const int hintGrid = std::min(std::max((int)sqrt(V / 48.0), 1), 32);
+	// The volume bounds of the edges need such a far vertex for many more directions than there are cells,
+	// and take it from here. For them the grid is finer, and every cell starts out with the vertex that a
+	// climb along the direction of its center ends at.
+	const int hintGrid = boundVolumes ? std::min(std::max((int)sqrt(E * 0.5), 8), 64) : std::min(std::max((int)sqrt(V / 48.0), 1), 32);
 	std::vector<int> extremeVertexSearchHints(6 * hintGrid * hintGrid, 0);
 	auto extremeVertexSearchHint = [&](const vec3 &direction) -> int &
 	{
@@ -1527,23 +1534,40 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		const int cellX = x >= 0.f ? std::min((int)x, hintGrid - 1) : 0, cellY = y >= 0.f ? std::min((int)y, hintGrid - 1) : 0;
 		return extremeVertexSearchHints[((axis * 2 + (direction[axis] < 0.f)) * hintGrid + cellX) * hintGrid + cellY];
 	};
+	if (boundVolumes)
+	{
+		int v = 0;
+		for (int side = 0; side < 6; ++side)
+			for (int x = 0; x < hintGrid; ++x)
+				for (int i = 0; i < hintGrid; ++i)
+				{
+					// Back and forth, so that each cell is next to the previous one, and the climb to its vertex is short.
+					const int y = (x & 1) ? hintGrid - 1 - i : i;
+					vec3 center;
+					center[side / 2] = (side & 1) ? -1.f : 1.f;
+					center[(side / 2 + 1) % 3] = (2 * x + 1 - hintGrid) / (float)hintGrid;
+					center[(side / 2 + 2) % 3] = (2 * y + 1 - hintGrid) / (float)hintGrid;
+					v = ClimbAlong(vtx, adjacencyData, center, v);
+					extremeVertexSearchHints[(side * hintGrid + x) * hintGrid + y] = v;
+				}
+	}
 
 	// For each edge, a lower bound for the volume of the boxes that have a face flush with the edge. An edge for
 	// which that is no less than the volume of the best box so far is of no use to the search.
 	// The normal n1 of that face of the box is on the arc of the edge, where the hull is at least minWidth wide.
 	// The other two axes n2 and n3 of the box are perpendicular to n1. So they are at most as far from the plane
 	// that is perpendicular to the middle of the arc, as n1 is from that middle. In that plane, the hull is
-	// measured along numSamples directions and their opposites, by climbing to a vertex that is far along each.
+	// measured along numSamples directions and their opposites, with the vertex that the search hints have for
+	// each: a vertex that is far along it. (Any two vertices give a lower bound for the width.)
 	// n2 and n3 are both within `turn` (as unit vectors) of one of those directions s. The two vertices found
 	// for s and -s, which are d apart, are at least d.s (1 - turn^2/2) - turn |d - (d.s) s| apart along such an
 	// axis, and the hull is at least that wide. As n2 and n3 are perpendicular, their two directions are a
 	// quarter of a turn apart, give or take `spread` samples. The smallest product of two such widths is a lower
 	// bound for the area of the face of the box that n2 and n3 span.
 	// On the side, the samples of each edge give a box to start the search with.
-	// Computing the bound of an edge takes about as long as finding a hundred sidepodal edges for it, which is
-	// more than the edges of a small hull have. So this is left out for small hulls: their bounds stay zero.
+	// For small hulls this is left out, see boundVolumes: their bounds stay zero.
 	std::vector<double> minVolumeForEdge(E, 0.0);
-	if (spatialEdgeOrder.size() >= 512)
+	if (boundVolumes)
 	{
 		const int numSamples = 32;
 		const double pi = 3.14159265358979323846;
@@ -1563,8 +1587,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			for (int k = 0; k < 2 * numSamples; ++k)
 			{
 				sample[k] = basisU * sampleCos[k] + basisV * sampleSin[k];
-				int &hint = extremeVertexSearchHint(sample[k]);
-				farVertex[k] = hint = ClimbAlong(vtx, adjacencyData, sample[k], hint);
+				farVertex[k] = extremeVertexSearchHint(sample[k]);
 			}
 			const double chord = std::min((double)arcChord[e], 1.0);
 			const double turn = sqrt(std::max(2.0 - 2.0 * sqrt(1.0 - chord * chord), 0.0)) + 2.0 * sin(pi / (4.0 * numSamples)) + 1e-6;
@@ -1582,6 +1605,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			minVolumeForEdge[e] = minWidth[e] * area;
 
 			// The box to start with: the middle of the arc, and the two samples that make the smallest face.
+			// Measured with the vertices of the hints, the box comes out no larger than it is. If it can still be
+			// the best box, its widths are measured with the vertices that a climb from those ends at.
 			int best = 0;
 			for (int k = 1; k < numSamples / 2; ++k)
 				if (width[k] * width[k + numSamples / 2] < width[best] * width[best + numSamples / 2])
@@ -1589,8 +1614,20 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			float minN1 = FLT_MAX;
 			for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
 				minN1 = fminf(minN1, dot(arcMiddle[e], vtx[antipodalPointsForEdge[e][j]]));
-			TestBox(vtx, arcMiddle[e], sample[best], (float)((dot(arcMiddle[e], vtx[edges[e].first]) - minN1) * width[best] * width[best + numSamples / 2]),
-				&minVolume, &minOBB);
+			const double widthN1 = dot(arcMiddle[e], vtx[edges[e].first]) - minN1;
+			if (widthN1 * width[best] * width[best + numSamples / 2] < minVolume)
+			{
+				double faceWidth[2];
+				for (int axis = 0; axis < 2; ++axis)
+				{
+					const int k = best + axis * numSamples / 2;
+					int &hint1 = extremeVertexSearchHint(sample[k]), &hint2 = extremeVertexSearchHint(sample[k + numSamples]);
+					hint1 = ClimbAlong(vtx, adjacencyData, sample[k], farVertex[k]);
+					hint2 = ClimbAlong(vtx, adjacencyData, sample[k + numSamples], farVertex[k + numSamples]);
+					faceWidth[axis] = dot(dvec3(sample[k]), dvec3(vtx[hint1]) - dvec3(vtx[hint2]));
+				}
+				TestBox(vtx, arcMiddle[e], sample[best], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
+			}
 		};
 		// How many edges this rules out depends on the shape of the hull: on a ball, where all boxes are about
 		// the same, it rules out none. So try it on every 16th edge first, and go on only if that pays off.
