@@ -1554,93 +1554,174 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 
 	// For each edge, a lower bound for the volume of the boxes that have a face flush with the edge. An edge for
 	// which that is no less than the volume of the best box so far is of no use to the search.
+	//
 	// The normal n1 of that face of the box is on the arc of the edge, where the hull is at least minWidth wide.
-	// The other two axes n2 and n3 of the box are perpendicular to n1. So they are at most as far from the plane
-	// that is perpendicular to the middle of the arc, as n1 is from that middle. In that plane, the hull is
-	// measured along numSamples directions and their opposites, with the vertex that the search hints have for
-	// each: a vertex that is far along it. (Any two vertices give a lower bound for the width.)
-	// n2 and n3 are both within `turn` (as unit vectors) of one of those directions s. The two vertices found
-	// for s and -s, which are d apart, are at least d.s (1 - turn^2/2) - turn |d - (d.s) s| apart along such an
-	// axis, and the hull is at least that wide. As n2 and n3 are perpendicular, their two directions are a
-	// quarter of a turn apart, give or take `spread` samples. The smallest product of two such widths is a lower
-	// bound for the area of the face of the box that n2 and n3 span.
+	// It is at most an angle t away from the middle m of the arc. The other two axes of the box are
+	// perpendicular to n1, so each of them is n = u cos(b) + m sin(b), for a unit vector u in the plane that is
+	// perpendicular to m and an angle |b| <= t. Any two vertices of the hull, d apart, show that the hull is at
+	// least n.d >= (u.d) cos(t) - |m.d| sin(t) wide along n, if u.d >= 0.
+	//
+	// For the vertices to use, that plane is sampled: for numSamples directions that divide half a turn evenly,
+	// and for their opposites, the search hints have a vertex that is far along the direction. That makes one
+	// pair of vertices per sample, which are far apart along it. For a u in the sector between two consecutive
+	// samples, the hull is at least as wide as the larger one of the two bounds that the pairs of those two
+	// samples give. Over the sector, that is the smallest at an end of the sector, or where the two bounds are
+	// equal. (Or it is negative there, which says nothing.) So each sector gets a lower bound for the width of
+	// the hull along the axes n whose u is in the sector.
+	//
+	// The two axes are perpendicular to each other, so the u of one is a quarter of a turn away from the u of
+	// the other, give or take an angle delta with sin(delta) <= tan(t)^2. For a short arc that is a fraction
+	// of a sector: then the bound of each sector is made to hold for delta beyond its two ends as well, so that
+	// the other u is in the sector that is a quarter of a turn away, as far as the bounds go. Otherwise all the
+	// sectors are tried that the other u can be in. The smallest product of the bounds of two such sectors is
+	// a lower bound for the area of the face of the box that the two axes span.
+	//
 	// On the side, the samples of each edge give a box to start the search with.
 	// For small hulls this is left out, see boundVolumes: their bounds stay zero.
 	std::vector<double> minVolumeForEdge(E, 0.0);
 	if (boundVolumes)
 	{
-		const int numSamples = 32;
+		const int minSamples = 16, maxSamples = 128;
 		const double pi = 3.14159265358979323846;
-		std::vector<int> farVertex(2 * numSamples);
-		std::vector<vec3> sample(2 * numSamples);
-		std::vector<float> sampleCos(2 * numSamples), sampleSin(2 * numSamples);
-		std::vector<double> width(numSamples), widthBound(numSamples);
-		for (int k = 0; k < 2 * numSamples; ++k)
+		// The directions of the plane, in its basis: maxSamples samples per half a turn, and the middles of the
+		// sectors between them.
+		std::vector<double> planeCos(4 * maxSamples + 1), planeSin(4 * maxSamples + 1);
+		for (int k = 0; k <= 4 * maxSamples; ++k)
 		{
-			sampleCos[k] = (float)cos(k * pi / numSamples);
-			sampleSin[k] = (float)sin(k * pi / numSamples);
+			planeCos[k] = cos(k * pi / (2 * maxSamples));
+			planeSin[k] = sin(k * pi / (2 * maxSamples));
 		}
-		auto boundVolume = [&](int e)
+		std::vector<int> farVertex(2 * maxSamples);
+		// For the pair of vertices of each sample: how far apart they are along the two basis vectors of the
+		// plane, times cos(t); and what the bound of the pair loses to the tilt of the axis.
+		std::vector<double> pairU(maxSamples + 1), pairV(maxSamples + 1), pairLoss(maxSamples + 1);
+		// For each sector: the bound for the width of the hull along the axes whose u is in the sector.
+		std::vector<double> sectorWidth(maxSamples);
+		auto boundVolume = [&](int e, int numSamples)
 		{
+			const int step = 2 * maxSamples / numSamples; // From one sample to the next, in planeCos and planeSin.
 			vec3 basisU, basisV;
 			PerpendicularBasis(arcMiddle[e], basisU, basisV);
 			for (int k = 0; k < 2 * numSamples; ++k)
+				farVertex[k] = extremeVertexSearchHint(basisU * (float)planeCos[k * step] + basisV * (float)planeSin[k * step]);
+			// arcChord is 2 sin(t/2), rounded.
+			const double chord = std::min((double)arcChord[e] + 1e-6, 1.4);
+			const double cosTilt = 1.0 - chord * chord * 0.5, sinTilt = chord * sqrt(1.0 - chord * chord * 0.25);
+			const double sinDelta = sinTilt * sinTilt / (cosTilt * cosTilt) + 1e-9;
+			for (int k = 0; k <= numSamples; ++k)
 			{
-				sample[k] = basisU * sampleCos[k] + basisV * sampleSin[k];
-				farVertex[k] = extremeVertexSearchHint(sample[k]);
+				const dvec3 d = dvec3(vtx[farVertex[k % (2 * numSamples)]]) - dvec3(vtx[farVertex[(k + numSamples) % (2 * numSamples)]]);
+				pairU[k] = cosTilt * dot(dvec3(basisU), d);
+				pairV[k] = cosTilt * dot(dvec3(basisV), d);
+				pairLoss[k] = sinTilt * fabs(dot(dvec3(arcMiddle[e]), d)) + widthMargin;
 			}
-			const double chord = std::min((double)arcChord[e], 1.0);
-			const double turn = sqrt(std::max(2.0 - 2.0 * sqrt(1.0 - chord * chord), 0.0)) + 2.0 * sin(pi / (4.0 * numSamples)) + 1e-6;
+			// The bound of each sector: the smallest value in the sector of the larger one of the bounds of its two
+			// pairs. For the direction (c, s) of the plane, the bound of pair j is c pairU[j] + s pairV[j] - pairLoss[j].
+			// The sector is extended by delta at both ends, if delta is at most a quarter of a sector or so.
+			const bool extend = sinDelta <= 0.5 * planeSin[step / 2];
+			const double sinExtend = extend ? sinDelta : 0.0, cosExtend = sqrt(1.0 - sinExtend * sinExtend);
+			const double cosHalfSector = planeCos[step / 2] * cosExtend - planeSin[step / 2] * sinExtend - 1e-9;
 			for (int k = 0; k < numSamples; ++k)
 			{
-				const dvec3 d = dvec3(vtx[farVertex[k]]) - dvec3(vtx[farVertex[k + numSamples]]);
-				width[k] = dot(dvec3(sample[k]), d);
-				widthBound[k] = std::max(width[k] * (1.0 - turn * turn * 0.5) - turn * sqrt(std::max(dot(d, d) - width[k] * width[k], 0.0)) - widthMargin, 0.0);
+				const double u0 = pairU[k], v0 = pairV[k], l0 = pairLoss[k], u1 = pairU[k + 1], v1 = pairV[k + 1], l1 = pairLoss[k + 1];
+				// At the two ends.
+				const double cb = planeCos[k * step], sb = planeSin[k * step], ce = planeCos[(k + 1) * step], se = planeSin[(k + 1) * step];
+				const double c0 = cb * cosExtend + sb * sinExtend, s0 = sb * cosExtend - cb * sinExtend;
+				const double c1 = ce * cosExtend - se * sinExtend, s1 = se * cosExtend + ce * sinExtend;
+				double bound = std::min(std::max(u0 * c0 + v0 * s0 - l0, u1 * c0 + v1 * s0 - l1), std::max(u0 * c1 + v0 * s1 - l0, u1 * c1 + v1 * s1 - l1));
+				// Where the two are equal: c a + s b = l, for the differences a, b and l of the two pairs. That has
+				// two solutions, if any. They count if they are in the sector. (Being a little off it does no harm.)
+				const double a = u0 - u1, b = v0 - v1, l = l0 - l1, lengthSq = a * a + b * b;
+				if (lengthSq > l * l)
+				{
+					const double root = sqrt(lengthSq - l * l), scale = 1.0 / lengthSq;
+					const double cm = planeCos[k * step + step / 2], sm = planeSin[k * step + step / 2];
+					for (int side = 0; side < 2; ++side)
+					{
+						const double r = side == 0 ? root : -root, c = (l * a - r * b) * scale, sn = (l * b + r * a) * scale;
+						if (c * cm + sn * sm >= cosHalfSector)
+							bound = std::min(bound, u0 * c + v0 * sn - l0);
+					}
+				}
+				sectorWidth[k] = std::max(bound, 0.0);
 			}
-			const int spread = (int)ceil(asin(std::min(2.0 * turn + turn * turn, 1.0)) * numSamples / pi);
 			double area = DBL_MAX;
-			for (int k = 0; k < numSamples; ++k)
-				for (int j = numSamples / 2 - spread; j <= numSamples / 2 + spread; ++j)
-					area = std::min(area, widthBound[k] * widthBound[(k + j + numSamples) % numSamples]);
-			minVolumeForEdge[e] = minWidth[e] * area;
+			if (extend)
+				for (int k = 0; k < numSamples / 2; ++k)
+					area = std::min(area, sectorWidth[k] * sectorWidth[k + numSamples / 2]);
+			else
+			{
+				const double delta = sinDelta < 1.0 ? asin(sinDelta) : pi * 0.5;
+				const int spread = std::min((int)ceil(delta * numSamples / pi), numSamples / 2);
+				for (int k = 0; k < numSamples; ++k)
+					for (int j = numSamples / 2 - spread; j <= numSamples / 2 + spread; ++j)
+						area = std::min(area, sectorWidth[k] * sectorWidth[(k + j + numSamples) % numSamples]);
+			}
+			minVolumeForEdge[e] = std::max(minVolumeForEdge[e], minWidth[e] * area);
 
 			// The box to start with: the middle of the arc, and the two samples that make the smallest face.
 			// Measured with the vertices of the hints, the box comes out no larger than it is. If it can still be
 			// the best box, its widths are measured with the vertices that a climb from those ends at.
 			int best = 0;
-			for (int k = 1; k < numSamples / 2; ++k)
-				if (width[k] * width[k + numSamples / 2] < width[best] * width[best + numSamples / 2])
+			double bestArea = DBL_MAX;
+			for (int k = 0; k < numSamples / 2; ++k)
+			{
+				const int l = k + numSamples / 2;
+				const double faceArea = (pairU[k] * planeCos[k * step] + pairV[k] * planeSin[k * step]) * (pairU[l] * planeCos[l * step] + pairV[l] * planeSin[l * step])
+					/ (cosTilt * cosTilt);
+				if (faceArea < bestArea)
+				{
+					bestArea = faceArea;
 					best = k;
+				}
+			}
 			float minN1 = FLT_MAX;
 			for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
 				minN1 = fminf(minN1, dot(arcMiddle[e], vtx[antipodalPointsForEdge[e][j]]));
 			const double widthN1 = dot(arcMiddle[e], vtx[edges[e].first]) - minN1;
-			if (widthN1 * width[best] * width[best + numSamples / 2] < minVolume)
+			if (widthN1 * bestArea < minVolume)
 			{
+				vec3 axis[2];
 				double faceWidth[2];
-				for (int axis = 0; axis < 2; ++axis)
+				for (int a = 0; a < 2; ++a)
 				{
-					const int k = best + axis * numSamples / 2;
-					int &hint1 = extremeVertexSearchHint(sample[k]), &hint2 = extremeVertexSearchHint(sample[k + numSamples]);
-					hint1 = ClimbAlong(vtx, adjacencyData, sample[k], farVertex[k]);
-					hint2 = ClimbAlong(vtx, adjacencyData, sample[k + numSamples], farVertex[k + numSamples]);
-					faceWidth[axis] = dot(dvec3(sample[k]), dvec3(vtx[hint1]) - dvec3(vtx[hint2]));
+					const int k = best + a * numSamples / 2;
+					axis[a] = basisU * (float)planeCos[k * step] + basisV * (float)planeSin[k * step];
+					int &hint1 = extremeVertexSearchHint(axis[a]), &hint2 = extremeVertexSearchHint(-axis[a]);
+					hint1 = ClimbAlong(vtx, adjacencyData, axis[a], farVertex[k]);
+					hint2 = ClimbAlong(vtx, adjacencyData, -axis[a], farVertex[k + numSamples]);
+					faceWidth[a] = dot(dvec3(axis[a]), dvec3(vtx[hint1]) - dvec3(vtx[hint2]));
 				}
-				TestBox(vtx, arcMiddle[e], sample[best], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
+				TestBox(vtx, arcMiddle[e], axis[0], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
 			}
 		};
-		// How many edges this rules out depends on the shape of the hull: on a ball, where all boxes are about
-		// the same, it rules out none. So try it on every 16th edge first, and go on only if that pays off.
-		const size_t every = 16;
-		size_t ruledOut = 0;
-		for (size_t ii = 0; ii < spatialEdgeOrder.size(); ii += every)
-			boundVolume(spatialEdgeOrder[ii]);
-		for (size_t ii = 0; ii < spatialEdgeOrder.size(); ii += every)
-			ruledOut += minVolumeForEdge[spatialEdgeOrder[ii]] >= minVolume;
-		if (ruledOut * every * 10 >= spatialEdgeOrder.size())
+		// The more samples, the tighter the bound, and the longer it takes to compute. So the edges are bounded
+		// with few samples first, and those that are still in the search then, with twice as many, and so on.
+		// How many edges that rules out depends on the shape of the hull: on a ball, where all boxes are about
+		// the same, it rules out few. So each number of samples is tried on every 16th edge first, and used on
+		// the other edges only if that pays off: bounding an edge takes time in proportion to the number of
+		// samples, and ruling one out saves the search for its sidepodal edges and all that is done with them,
+		// which takes time in proportion to their number, about the square root of the number of edges. (The
+		// factor between the two is a measured one.)
+		std::vector<int> open;
+		for (int numSamples = minSamples; numSamples <= maxSamples; numSamples *= 2)
+		{
+			open.clear();
 			for (size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
-				if (ii % every != 0)
-					boundVolume(spatialEdgeOrder[ii]);
+				if (minVolumeForEdge[spatialEdgeOrder[ii]] < minVolume)
+					open.push_back(spatialEdgeOrder[ii]);
+			const size_t every = 16;
+			size_t tried = 0, ruledOut = 0;
+			for (size_t i = 0; i < open.size(); i += every)
+				boundVolume(open[i], numSamples);
+			for (size_t i = 0; i < open.size(); i += every, ++tried)
+				ruledOut += minVolumeForEdge[open[i]] >= minVolume;
+			if (ruledOut * sqrt((double)E) < 0.064 * numSamples * tried)
+				continue;
+			for (size_t i = 0; i < open.size(); ++i)
+				if (i % every != 0)
+					boundVolume(open[i], numSamples);
+		}
 	}
 
 	TRACE_MARK(t0, "obb: volume bounds of the edges");
