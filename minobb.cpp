@@ -1315,7 +1315,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	  4. Precompute antipodal vertices for each edge. O(A*ElogV), where A is the size of antipodal vertices per edge. A ~ O(1) on average.
 	  5. Compute for each edge lower bounds for the width of the hull along the normals of the box faces that can be
 	     flush with the edge, and for the volume of the boxes that have such a face. O(E)
-	     The steps below skip whatever these bounds show to be no smaller than the best box found so far.
+	     The steps below skip whatever these bounds show to be no smaller than the best box found so far. The
+	     volume bounds also tell in which directions around an edge the other axes of a smaller box can be: the
+	     search for the sidepodal edges of the edge stays in those. For the edges whose arc of normals is long,
+	     the bounds are computed for pieces of the arc, once the steps below turn out to take long with them.
 	  6. Test all configurations where two edges are on opposing faces, and the third one is on a face adjacent to the two. O(E*sqrtE*logV)?
 	  7. Test all configurations where two edges are on the same face (OBB aligns with a face of the convex hull). O(F*sqrtE*logV).
 	  8. Test all configurations where all three edges are on adjacent faces. O(ES) = O(E*sqrtE)?, where S is the size
@@ -1592,6 +1595,30 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	// edges: the bounds take time to compute, and the edges of a small hull have few sidepodal edges to rule out.
 	const bool boundVolumes = spatialEdgeOrder.size() >= 96;
 
+	// The longer the arc of an edge, the less the bounds below can tell about it, and the more sidepodal edges
+	// the edge has. A long arc can therefore be divided into pieces of equal length, see divideLongArcs() below,
+	// and the bounds computed for each piece on its own: for the boxes whose face is flush with the edge and has
+	// its normal on the piece. A piece is an arc like that of an edge, between two normals that the edge can be
+	// flush with. The pieces are numbered on from the edges, and have their entries after those of the edges in
+	// the data that the bounds work with: the two ends, the middle and the chord of the arc, minWidth,
+	// minVolumeForEdge and openSectors. The pieces of edge e are those from piecesBegin[e] up to piecesEnd[e],
+	// in the order from edgeNormalB to edgeNormalA; an edge with a short arc has none. edgeOfPiece tells the
+	// edge of a piece, by the number of the piece less E. There are pieces only if dividedArcs says so.
+	const float longArcChord = 0.07f; // An arc of 8 degrees: 4 degrees to both sides of its middle.
+	const double pieceAngle = 6.0 * 3.14159265358979323846 / 180.0;
+	// (arcChord is 2 sin(angle / 4).)
+	auto numPiecesOfArc = [&](int e) { return (int)ceil(4.0 * asin(std::min(arcChord[e] * 0.5, 1.0)) / pieceAngle); };
+	int numLongArcs = 0, numPieces = 0;
+	if (boundVolumes)
+		for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+			if (arcChord[spatialEdgeOrder[ii]] > longArcChord)
+			{
+				++numLongArcs;
+				numPieces += numPiecesOfArc(spatialEdgeOrder[ii]);
+			}
+	bool dividedArcs = false;
+	std::vector<int> piecesBegin, piecesEnd, edgeOfPiece;
+
 	// Take advantage of spatial locality: start the search for the extreme vertex along a direction from the
 	// extreme vertex that an earlier search along a similar direction found. For that, the directions are
 	// divided into cells (the six faces of a cube, each cut into a grid of squares), and for each cell the
@@ -1658,12 +1685,15 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	//
 	// On the side, the samples of each edge give a box to start the search with.
 	// For small hulls this is left out, see boundVolumes: their bounds stay zero.
+	// (For an edge whose arc is divided into pieces, the bound is the smallest one of the bounds of its pieces.
+	// The pieces have their bounds after those of the edges.)
 	std::vector<double> minVolumeForEdge(E, 0.0);
 	// The bound also tells which of the sectors can have the u of an axis of a box that is smaller than the
 	// best box. For each edge, that is kept as a mask of 64 sectors that divide half a turn, see
 	// SectorOfDirection(): a sector that is not in the mask of an edge is of no use to the search, as far as
 	// the boxes go that have a face flush with the edge. (The plane and its basis are those of the bound of the
 	// edge: the basis that PerpendicularBasis() makes for the middle of the arc of the edge.)
+	// (An edge whose arc is divided into pieces has no sectors of its own: its pieces have them.)
 	std::vector<unsigned long long> openSectors(E, ~0ULL);
 	const int minSamples = 16, maxSamples = PlaneDirections::maxSamples;
 	const double pi = 3.14159265358979323846;
@@ -1767,10 +1797,12 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				best = k;
 			}
 		}
+		const int edge = e < E ? e : edgeOfPiece[e - E];
+		const std::vector<int> &antipodals = antipodalPointsForEdge[edge];
 		float minN1 = FLT_MAX;
-		for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
-			minN1 = fminf(minN1, dot(arcMiddle[e], vtx[antipodalPointsForEdge[e][j]]));
-		const double widthN1 = dot(arcMiddle[e], vtx[edges[e].first]) - minN1;
+		for (size_t j = 0; j < antipodals.size(); ++j)
+			minN1 = fminf(minN1, dot(arcMiddle[e], vtx[antipodals[j]]));
+		const double widthN1 = dot(arcMiddle[e], vtx[edges[edge].first]) - minN1;
 		if (widthN1 * bestArea < minVolume)
 		{
 			vec3 axis[2];
@@ -1787,36 +1819,41 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			TestBox(vtx, arcMiddle[e], axis[0], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
 		}
 	};
-	if (boundVolumes)
+	// Computes the bounds of the given arcs. The more samples, the tighter the bound, and the longer it takes
+	// to compute. So the arcs are bounded with few samples first, and those that are still in the search then,
+	// with twice as many, and so on. How many arcs that rules out depends on the shape of the hull: on a ball,
+	// where all boxes are about the same, it rules out few. So each number of samples is tried on every 16th
+	// arc first, and used on the other arcs only if that rules out the given share of the arcs: firstShare
+	// for the first number of samples, and sharePerSample for each sample of the others.
+	auto boundArcs = [&](const std::vector<int> &arcs, double firstShare, double sharePerSample)
 	{
-		// The more samples, the tighter the bound, and the longer it takes to compute. So the edges are bounded
-		// with few samples first, and those that are still in the search then, with twice as many, and so on.
-		// How many edges that rules out depends on the shape of the hull: on a ball, where all boxes are about
-		// the same, it rules out few. So each number of samples is tried on every 16th edge first, and used on
-		// the other edges only if that pays off: bounding an edge takes time in proportion to the number of
-		// samples, and ruling one out saves the search for its sidepodal edges and all that is done with them,
-		// which takes time in proportion to their number, about the square root of the number of edges. (The
-		// factor between the two is a measured one.)
 		std::vector<int> open;
 		for (int numSamples = minSamples; numSamples <= maxSamples; numSamples *= 2)
 		{
 			open.clear();
-			for (size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
-				if (minVolumeForEdge[spatialEdgeOrder[ii]] < minVolume)
-					open.push_back(spatialEdgeOrder[ii]);
+			for (size_t ii = 0; ii < arcs.size(); ++ii)
+				if (minVolumeForEdge[arcs[ii]] < minVolume)
+					open.push_back(arcs[ii]);
 			const size_t every = 16;
 			size_t tried = 0, ruledOut = 0;
 			for (size_t i = 0; i < open.size(); i += every)
 				boundVolume(open[i], numSamples);
 			for (size_t i = 0; i < open.size(); i += every, ++tried)
 				ruledOut += minVolumeForEdge[open[i]] >= minVolume;
-			if (ruledOut * sqrt((double)E) < 0.064 * numSamples * tried)
+			if (ruledOut < (numSamples == minSamples ? firstShare : sharePerSample * numSamples) * tried)
 				continue;
 			for (size_t i = 0; i < open.size(); ++i)
 				if (i % every != 0)
 					boundVolume(open[i], numSamples);
 		}
-	}
+	};
+	// For the edges, a number of samples pays off like this: bounding an edge takes time in proportion to the
+	// number of samples, and ruling one out saves the search for its sidepodal edges and all that is done with
+	// them, which takes time in proportion to their number, about the square root of the number of edges. (The
+	// factor between the two is a measured one.)
+	const double shareOfEdgesPerSample = 0.064 / sqrt((double)E);
+	if (boundVolumes)
+		boundArcs(spatialEdgeOrder, shareOfEdgesPerSample * minSamples, shareOfEdgesPerSample);
 
 	TRACE_MARK(t0, "obb: volume bounds of the edges");
 
@@ -1829,22 +1866,102 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	std::vector<int> compatibleEdges;
 	std::vector<size_t> compatibleEdgesBegin(E, 0), compatibleEdgesEnd(E, 0);
 	std::vector<unsigned char> haveSidepodalEdges(E, 0);
-	// For the search for them: the dot products of the normal of a face with the two normals of the current
-	// edge i, for the faces for which faceDotsOfEdge says that they are of edge i.
+	// For the search for them: the dot products of the normal of a face with the two normals of the arc that is
+	// searched for, for the faces for which faceDotsOfSearch says that they are of the current search.
 	std::vector<float> faceDotA(F), faceDotB(F);
-	std::vector<int> faceDotsOfEdge(F, -1);
+	std::vector<int> faceDotsOfSearch(F, -1);
+	int sidepodalSearchNumber = 0;
+	// For each edge, the last edge whose list it was put on: an edge can be sidepodal to several pieces of the
+	// arc of another edge, and is listed for it only once. (For when arcs are divided.)
+	std::vector<int> listedForEdge;
 
-	// Computes the sidepodal edges of edge i, unless that is done already, by performing a graph search. The set
-	// of sidepodal edges is connected in the graph, which lets us avoid having to iterate over each edge pair of
-	// the convex hull. Total running time is O(E*sqrtE), if this is done for all edges.
-	auto findSidepodalEdges = [&](size_t i)
+	// Making the pieces of the long arcs and computing their bounds takes time, which for most hulls is more
+	// than the search spends on the long arcs as they are. So the search first goes without, and counts what it
+	// does with the long arcs: the edges that it looks at while it searches for their sidepodal edges, and for
+	// the third edges of the edge pairs that have a long arc. The pieces are made once it is clear that the
+	// search has more work than that left to do on the long arcs: when categories 2 and 3 have already done
+	// as much, with category 1 to come; or when category 1 is set to do as much on the edges that it has not
+	// got to yet, at the rate of the edges so far. (Making the pieces can save far more than it takes, and
+	// for a hull where it does not, this way it adds little.)
+	// A small hull is left as it is: its edges have few enough sidepodal edges for category 1 to try them all
+	// as third edges, see maxEdgesToTryAll, and that takes no longer for a long arc than for a short one.
+	const size_t maxEdgesToTryAll = 128;
+	size_t longArcWork = 0, longArcWorkBeforeCategory1 = 0;
+	const size_t longArcBudget = (size_t)numPieces * 128; // (A piece takes the time of about 128 looks at an edge.)
+	bool canDivideArcs = numLongArcs > 0 && (size_t)E > 2 * maxEdgesToTryAll;
+	// Divides the long arcs into pieces and computes the bounds of the pieces. If those do not rule out at
+	// least a quarter of the pieces, the arcs are left as they are after all. (A piece takes its first bound
+	// if that rules out a quarter of the pieces. For more samples, ruling out a piece saves only its share of
+	// the work on its edge, so that many more of the pieces have to be ruled out than of edges.)
+	auto divideLongArcs = [&]()
 	{
-		if (haveSidepodalEdges[i])
+		canDivideArcs = false;
+		piecesBegin.assign(E, 0);
+		piecesEnd.assign(E, 0);
+		std::vector<int> pieces;
+		pieces.reserve(numPieces);
+		for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+		{
+			const int e = spatialEdgeOrder[ii];
+			if (!(arcChord[e] > longArcChord))
+				continue;
+			const int count = numPiecesOfArc(e);
+			const dvec3 fa = edgeNormalA[e], fb = edgeNormalB[e];
+			const dvec3 axis = Normalized(cross(fa, fb)), towardsA = cross(fb, axis);
+			const double angle = atan2(dot(fa, towardsA), dot(fa, fb));
+			piecesBegin[e] = (int)edgeNormalA.size();
+			vec3 from = edgeNormalB[e];
+			for (int k = 1; k <= count; ++k)
+			{
+				const vec3 to = k == count ? edgeNormalA[e] : Normalized(fb * cos(k * angle / count) + towardsA * sin(k * angle / count)).ToFloat();
+				const vec3 middle = Normalized(from + to);
+				double width = 0.0;
+				for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
+				{
+					const dvec3 d = dvec3(vtx[edges[e].first]) - dvec3(vtx[antipodalPointsForEdge[e][j]]);
+					width = std::max(width, std::min(dot(dvec3(to), d), dot(dvec3(from), d)));
+				}
+				pieces.push_back((int)edgeNormalA.size());
+				edgeNormalA.push_back(to);
+				edgeNormalB.push_back(from);
+				arcMiddle.push_back(middle);
+				arcChord.push_back(sqrtf(std::max(LengthSq(to - middle), LengthSq(from - middle))));
+				minWidth.push_back((float)std::max(width - widthMargin, 0.0));
+				edgeOfPiece.push_back(e);
+				from = to;
+			}
+			piecesEnd[e] = (int)edgeNormalA.size();
+		}
+		minVolumeForEdge.resize(edgeNormalA.size(), 0.0);
+		openSectors.resize(edgeNormalA.size(), ~0ULL);
+		boundArcs(pieces, 0.25, shareOfEdgesPerSample * numPieces / numLongArcs);
+		size_t ruledOut = 0;
+		for (size_t k = 0; k < pieces.size(); ++k)
+			ruledOut += minVolumeForEdge[pieces[k]] >= minVolume;
+		if (ruledOut * 4 < pieces.size())
 			return;
-		haveSidepodalEdges[i] = 1;
-		TRACE_INC(sidepodalSearches);
-		vec3 f1a = edgeNormalA[i];
-		vec3 f1b = edgeNormalB[i];
+		dividedArcs = true;
+		listedForEdge.assign(E, -1);
+		for (size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+		{
+			const int e = spatialEdgeOrder[ii];
+			if (piecesBegin[e] < piecesEnd[e])
+				minVolumeForEdge[e] = std::max(minVolumeForEdge[e], *std::min_element(minVolumeForEdge.begin() + piecesBegin[e], minVolumeForEdge.begin() + piecesEnd[e]));
+		}
+	};
+
+	// The sidepodal edges of an edge are found by performing a graph search. The set of sidepodal edges is
+	// connected in the graph, which lets us avoid having to iterate over each edge pair of the convex hull.
+	// Total running time is O(E*sqrtE), if this is done for all edges.
+	// Appends to compatibleEdges the edges that are sidepodal to edge i as far as the given arc goes: the arc
+	// of the edge itself, or a piece of it.
+	auto searchSidepodalEdges = [&](size_t i, int arc)
+	{
+		vec3 f1a = edgeNormalA[arc];
+		vec3 f1b = edgeNormalB[arc];
+		const bool pieces = arc != (int)i;
+		++sidepodalSearchNumber;
+		size_t looks = 0;
 
 		// Start the search from the extreme vertex in a direction that is perpendicular to f1a: some of its
 		// edges are sidepodal to this edge. If several vertices tie as the extreme one (the direction is the
@@ -1856,8 +1973,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		// of the arc. The normals that are perpendicular to a normal of the arc and in the sectors of the
 		// run are connected, on each side, so the search gets to all the edges that have one.)
 		float dummy;
-		compatibleEdgesBegin[i] = compatibleEdges.size();
-		const unsigned long long open = openSectors[i];
+		const unsigned long long open = openSectors[arc];
 		vec3 basisU, basisV;
 		if (open == ~0ULL)
 		{
@@ -1867,7 +1983,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		}
 		else
 		{
-			PerpendicularBasis(arcMiddle[i], basisU, basisV);
+			PerpendicularBasis(arcMiddle[arc], basisU, basisV);
 			for (int first = 0; first < 64; ++first)
 				if (((open >> first) & 1) != 0 && ((open >> ((first + 63) % 64)) & 1) == 0)
 				{
@@ -1901,6 +2017,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				if (HAVE_VISITED_VERTEX(vAdj))
 					continue;
 
+				++looks;
 				// This is the test of CanBePerpendicular(), without the tolerance: the dot product of a normal on
 				// the arc of edge i with a normal on the arc of the other edge is between the dot products of the
 				// ends of the two arcs, i.e. of the normals of the two faces of each edge. Each face is shared by
@@ -1908,9 +2025,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				int edge = adjacentEdges[v][j];
 				const int faces[2] = { facesForEdge[edge].first, facesForEdge[edge].second };
 				for(int k = 0; k < 2; ++k)
-					if (faceDotsOfEdge[faces[k]] != (int)i)
+					if (faceDotsOfSearch[faces[k]] != sidepodalSearchNumber)
 					{
-						faceDotsOfEdge[faces[k]] = (int)i;
+						faceDotsOfSearch[faces[k]] = sidepodalSearchNumber;
 						faceDotA[faces[k]] = dot(f1a, faceNormals[faces[k]]);
 						faceDotB[faces[k]] = dot(f1b, faceNormals[faces[k]]);
 					}
@@ -1919,12 +2036,49 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 					&& (open == ~0ULL || (open & SectorsOfPerpendicularNormals(edgeNormalA[edge], edgeNormalB[edge], aa, ba, ab, bb, basisU, basisV)) != 0))
 				{
 					// Edges inside faces with 180 degrees dihedral angles can be ignored.
-					if (!IS_INTERNAL_EDGE(edge) && minVolumeForEdge[edge] < minVolume)
+					// If the arc of the other edge is divided into pieces, one of those that are still in the
+					// search has to pass the same tests.
+					bool sidepodal = !IS_INTERNAL_EDGE(edge) && minVolumeForEdge[edge] < minVolume && (!pieces || listedForEdge[edge] != (int)i);
+					if (sidepodal && dividedArcs && piecesBegin[edge] < piecesEnd[edge])
+					{
+						sidepodal = false;
+						for (int piece = piecesBegin[edge]; piece < piecesEnd[edge] && !sidepodal; ++piece)
+						{
+							if (minVolumeForEdge[piece] >= minVolume)
+								continue;
+							const float paa = dot(f1a, edgeNormalA[piece]), pba = dot(f1b, edgeNormalA[piece]);
+							const float pab = dot(f1a, edgeNormalB[piece]), pbb = dot(f1b, edgeNormalB[piece]);
+							sidepodal = fminf(fminf(paa, pba), fminf(pab, pbb)) <= 0.f && fmaxf(fmaxf(paa, pba), fmaxf(pab, pbb)) >= 0.f
+								&& (open == ~0ULL || (open & SectorsOfPerpendicularNormals(edgeNormalA[piece], edgeNormalB[piece], paa, pba, pab, pbb, basisU, basisV)) != 0);
+						}
+					}
+					if (sidepodal)
+					{
 						compatibleEdges.push_back(edge);
+						if (pieces)
+							listedForEdge[edge] = (int)i;
+					}
 					traverseStack.push_back(vAdj);
 				}
 			}
 		}
+		if (canDivideArcs && arcChord[arc] > longArcChord)
+			longArcWork += looks;
+	};
+
+	// Computes the sidepodal edges of edge i, unless that is done already. If the arc of the edge is divided
+	// into pieces, they are searched for piece by piece, for the pieces that are still in the search.
+	auto findSidepodalEdges = [&](size_t i)
+	{
+		if (haveSidepodalEdges[i])
+			return;
+		haveSidepodalEdges[i] = 1;
+		TRACE_INC(sidepodalSearches);
+		compatibleEdgesBegin[i] = compatibleEdges.size();
+		const bool pieces = dividedArcs && piecesBegin[i] < piecesEnd[i];
+		for (int arc = pieces ? piecesBegin[i] : (int)i, end = pieces ? piecesEnd[i] : (int)i + 1; arc < end; ++arc)
+			if (!pieces || minVolumeForEdge[arc] < minVolume)
+				searchSidepodalEdges(i, arc);
 		compatibleEdgesEnd[i] = compatibleEdges.size();
 	};
 
@@ -2021,6 +2175,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
 		size_t i = (size_t)spatialEdgeOrder[ii];
+		if (canDivideArcs && longArcWork > longArcBudget)
+			divideLongArcs();
 		if (minVolumeForEdge[i] >= minVolume)
 			continue;
 		vec3 f1a = edgeNormalA[i];
@@ -2065,6 +2221,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	for(size_t ii = 0; ii < spatialFaceOrder.size(); ++ii) // O(F)
 	{
 		size_t i = spatialFaceOrder[ii];
+		if (canDivideArcs && longArcWork > longArcBudget)
+			divideLongArcs();
 		vec3 n1 = faceNormals[i];
 
 		// The edges that are sidepodal to the face are the ones that are sidepodal to any of its edges, as far
@@ -2121,7 +2279,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	// hull that are d apart are then at least d.searchDir (1 - turn^2/2) - turn |d - (d.searchDir) searchDir|
 	// apart along it: such as the given vertices, which are extreme vertices along searchDir and -searchDir,
 	// or at least along directions that are close to those.
-	auto thirdWidthBound = [&](size_t i, int edgeJ, const vec3 &searchDir, float len, int vertex1, int vertex2) -> double
+	auto thirdWidthBound = [&](int i, int edgeJ, const vec3 &searchDir, float len, int vertex1, int vertex2) -> double
 	{
 		const dvec3 d = dvec3(vtx[vertex1]) - dvec3(vtx[vertex2]);
 		const double w = dot(dvec3(searchDir), d);
@@ -2130,11 +2288,188 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	};
 
 	std::vector<vec3> thirdAxes;
-	const size_t maxEdgesToTryAll = 128;
 	// For each face, the last pair of edges (by a running number) for which the box was tested whose third face
 	// is flush with the face.
 	std::vector<size_t> faceTestedForPair(F, 0);
 	size_t pairNumber = 0;
+
+	// Searches the boxes that have a face flush with edge i and another one flush with edge J, with the normals
+	// of those faces on the given arcs: the arcs of the two edges, or pieces of them.
+	auto searchPair = [&](size_t i, int edgeJ, int arc1, int arc2)
+	{
+		const double pairWidth = (double)minWidth[arc1] * minWidth[arc2];
+		if (pairWidth * smallestMinWidth >= minVolume)
+			return;
+		const vec3 f1a = edgeNormalA[arc1], f1b = edgeNormalB[arc1], f2a = edgeNormalA[arc2], f2b = edgeNormalB[arc2];
+		if (AreEdgesBad(f1a, f1b, f2a, f2b))
+			return;
+
+		vec3 searchDir = cross(arcMiddle[arc1], arcMiddle[arc2]);
+		const float len = Normalize(searchDir);
+		if (len == 0.f)
+		{
+			searchDir = cross(f1a, f2a);
+			if (Normalize(searchDir) == 0.f)
+				searchDir = Perpendicular(f1a);
+		}
+
+		// Often the vertices that the searches for the extreme vertices would start from are enough to tell
+		// that these two edges are of no use.
+		// (When the two arcs together are longer than about 60 degrees, the bound says nothing.)
+		const bool boundThirdWidth = len > 0.f && arcChord[arc1] + arcChord[arc2] < 0.5f;
+		if (boundThirdWidth && pairWidth * thirdWidthBound(arc1, arc2, searchDir, len, extremeVertexSearchHint(searchDir), extremeVertexSearchHint(-searchDir)) >= minVolume)
+			return;
+
+		// The normal of the box face that is flush with one of the two edges is the direction of an axis of
+		// the boxes that are flush with the other edge: it has to be in a sector that is of use to that edge.
+		// (For the arc of edge J as an axis of the boxes of the arc of edge i, that is so if the list of edge i
+		// was made for that very arc: not for a piece of it.)
+		if (openSectors[arc2] != ~0ULL || (openSectors[arc1] != ~0ULL && arc1 != (int)i))
+		{
+			const float aa = dot(f1a, f2a), ab = dot(f1a, f2b), ba = dot(f1b, f2a), bb = dot(f1b, f2b);
+			vec3 basisU, basisV;
+			if (openSectors[arc2] != ~0ULL)
+			{
+				PerpendicularBasis(arcMiddle[arc2], basisU, basisV);
+				if ((openSectors[arc2] & SectorsOfPerpendicularNormals(f1a, f1b, aa, ab, ba, bb, basisU, basisV)) == 0)
+					return;
+			}
+			if (openSectors[arc1] != ~0ULL && arc1 != (int)i)
+			{
+				PerpendicularBasis(arcMiddle[arc1], basisU, basisV);
+				if ((openSectors[arc1] & SectorsOfPerpendicularNormals(f2a, f2b, aa, ba, ab, bb, basisU, basisV)) == 0)
+					return;
+			}
+		}
+
+		// (For divideLongArcs().)
+		const size_t workPerLook = canDivideArcs && (arcChord[arc1] > longArcChord || arcChord[arc2] > longArcChord) ? 1 : 0;
+
+		// Tests the box that has its faces flush with the edges i, J and K, if there is one. Returns whether
+		// the third axis of any box that is flush with the edges i and J can be on the arc of edge K at all.
+		const float axisDot = dot(arcAxis[i], arcAxis[edgeJ]);
+		const float axisTolerance = 1e-5f;
+		++pairNumber;
+		auto testThirdEdge = [&](int edgeK) -> bool
+		{
+			const vec3 &f3a = edgeNormalA[edgeK];
+			const vec3 &f3b = edgeNormalB[edgeK];
+			TRACE_INC(thirdEdgesTested);
+			longArcWork += workPerLook;
+			float range[2];
+			if (!CanBeThirdAxis(f1a, f1b, arcAxis[i], f2a, f2b, arcAxis[edgeJ], axisDot, axisTolerance, f3a, f3b, arcLengthSq[edgeK], range))
+				return false;
+
+			// If the third axis is at an end of the arc, it is the normal of a face of the hull, and all the
+			// edges of that face give the same box: one of them is enough.
+			if (range[1] < 1e-3f || range[0] > 1.f - 1e-3f)
+			{
+				const int face = range[1] < 1e-3f ? facesForEdge[edgeK].second : facesForEdge[edgeK].first;
+				if (faceTestedForPair[face] == pairNumber)
+					return true;
+				if (edgeJ < edgeK)
+					faceTestedForPair[face] = pairNumber;
+			}
+
+			// Test edge triplet i, edgeJ, edgeK.
+			if (edgeJ < edgeK && pairWidth * minWidth[edgeK] < minVolume && minVolumeForEdge[edgeK] < minVolume
+				&& !AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
+			{
+				vec3 n1[2], n2[2], n3[2];
+				TRACE_INC(edgeTriplets);
+				int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
+				for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
+				{
+					TRACE_INC(edgeTripletsSolved);
+					TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
+						edges, antipodalPointsForEdge, &minVolume, &minOBB);
+				}
+			}
+			return true;
+		};
+
+		// The third edge is sidepodal to edge i as well. If edge i has only few sidepodal edges, it is the
+		// fastest to simply try them all. Most of them are ruled out by where their arc is. The third axis is
+		// within `turn` of searchDir or its opposite (see thirdWidthBound(); the 2e-3 is for the tolerances of
+		// ComputeBasis()), so the middle of the arc has to be within that plus the distance to its ends. And
+		// the third axis is perpendicular to a normal on each of the two arcs, so its dot product with the
+		// middle of an arc is at most the distance from there to the ends of that arc: the arc of the third
+		// edge must have such a normal, which is tested for the shorter one of the two arcs.
+		if (compatibleEdgesEnd[i] - compatibleEdgesBegin[i] <= maxEdgesToTryAll)
+		{
+			TRACE_INC(edgePairsSearched);
+			longArcWork += workPerLook * ((compatibleEdgesEnd[i] - compatibleEdgesBegin[i]) / 4);
+			const float turn = len > 0.f ? arcChord[arc1] + arcChord[arc2] + (1.f - len) + 2e-3f : 2.f;
+			const int shorter = arcChord[arc1] <= arcChord[arc2] ? arc1 : arc2;
+			const float tilt = arcChord[shorter] + 2e-3f;
+			for(size_t k = compatibleEdgesBegin[i]; k < compatibleEdgesEnd[i]; ++k)
+			{
+				const int edgeK = compatibleEdges[k];
+				const float reach = turn + arcChord[edgeK];
+				if (edgeK <= edgeJ || pairWidth * minWidth[edgeK] >= minVolume || fabsf(dot(arcMiddle[edgeK], searchDir)) < 1.f - 0.5f * reach * reach)
+					continue;
+				const float a = dot(arcMiddle[shorter], edgeNormalA[edgeK]), b = dot(arcMiddle[shorter], edgeNormalB[edgeK]);
+				if (fminf(a, b) <= tilt && fmaxf(a, b) >= -tilt)
+					testThirdEdge(edgeK);
+			}
+			return;
+		}
+
+		// Otherwise find the extreme vertices of the hull along the third axis of a box that is flush with the
+		// two edges, of each family of such boxes. They also tell the best if the two edges are of any use.
+		// (The third axis of the first box points the same way as searchDir, except perhaps on arcs that are
+		// too long for the bound to say anything.)
+		thirdAxes.clear();
+		ThirdAxesOfBoxes(f1a, f1b, f2a, f2b, thirdAxes);
+		if (thirdAxes.empty())
+			thirdAxes.push_back(searchDir);
+		for(size_t k = 0; k < thirdAxes.size(); ++k)
+			for(int side = 0; side < 2; ++side)
+			{
+				const vec3 direction = side == 0 ? thirdAxes[k] : -thirdAxes[k];
+				int &hint = extremeVertexSearchHint(direction);
+				float dummy;
+				CLEAR_GRAPH_SEARCH();
+				hint = ExtremeVertexConvex(hull, adjacencyData, direction, floodFillVisited, floodFillVisitColor, dummy, hint); // O(log|V|)?
+				traverseStack.push_back(hint);
+			}
+		if (boundThirdWidth)
+		{
+			extremeVertexSearchHint(searchDir) = traverseStack[0];
+			extremeVertexSearchHint(-searchDir) = traverseStack[1];
+			if (pairWidth * thirdWidthBound(arc1, arc2, searchDir, len, traverseStack[0], traverseStack[1]) >= minVolume)
+			{
+				traverseStack.clear();
+				return;
+			}
+		}
+		TRACE_INC(edgePairsSearched);
+
+		// Find the edges that the third face of the box can be flush with. Along a family of boxes, the third
+		// axis of the box moves over the normals of the hull: over the normals that a face can have when it
+		// touches the hull at a vertex, and from one vertex to a neighbor over the arc of normals of the edge
+		// between them, which is then such a third edge. So the search goes from the extreme vertices of a
+		// box of each family over those edges to their other vertices. (An edge is looked at only from the
+		// first of its vertices that the search comes to.)
+		CLEAR_GRAPH_SEARCH();
+		while(!traverseStack.empty())
+		{
+			int v = traverseStack.back();
+			traverseStack.pop_back();
+			if (HAVE_VISITED_VERTEX(v))
+				continue;
+			MARK_VERTEX_VISITED(v);
+			const std::vector<int> &n = adjacencyData[v];
+			for(size_t k = 0; k < n.size(); ++k)
+				// Edges inside faces with 180 degrees dihedral angles can be ignored.
+				if (!HAVE_VISITED_VERTEX(n[k]) && !IS_INTERNAL_EDGE(adjacentEdges[v][k]) && testThirdEdge(adjacentEdges[v][k]))
+					traverseStack.push_back(n[k]);
+		}
+	};
+
+	if (canDivideArcs && longArcWork > longArcBudget)
+		divideLongArcs();
+	longArcWorkBeforeCategory1 = longArcWork;
 
 	// Category 1: all configurations where the OBB is flush with three edges on adjacent faces.
 	// This category takes the longest to search, and is therefore searched last: by now there is a box to beat,
@@ -2143,168 +2478,42 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
 		size_t i = (size_t)spatialEdgeOrder[ii];
+		if (canDivideArcs && (longArcWork - longArcWorkBeforeCategory1) * 8 > longArcBudget
+			&& (double)(longArcWork - longArcWorkBeforeCategory1) * (spatialEdgeOrder.size() - ii) > (double)longArcBudget * ii)
+			divideLongArcs();
 		// (The other two faces of the box are flush with an edge each as well.)
 		if (minVolumeForEdge[i] >= minVolume || (double)minWidth[i] * smallestMinWidth * smallestMinWidth >= minVolume) continue;
-		vec3 f1a = edgeNormalA[i];
-		vec3 f1b = edgeNormalB[i];
 		findSidepodalEdges(i);
 
 		for(size_t j = compatibleEdgesBegin[i]; j < compatibleEdgesEnd[i]; ++j) // O(sqrt(|E|))?
 		{
 			int edgeJ = compatibleEdges[j];
 			if (edgeJ <= (int)i) continue; // Remove symmetry.
-			const double pairWidth = (double)minWidth[i] * minWidth[edgeJ];
 			TRACE_INC(edgePairs);
-			if (minVolumeForEdge[edgeJ] >= minVolume || pairWidth * smallestMinWidth >= minVolume) continue;
-			vec3 f2a = edgeNormalA[edgeJ];
-			vec3 f2b = edgeNormalB[edgeJ];
-			if (AreEdgesBad(f1a, f1b, f2a, f2b)) continue;
-
-			vec3 searchDir = cross(arcMiddle[i], arcMiddle[edgeJ]);
-			const float len = Normalize(searchDir);
-			if (len == 0.f)
+			if (minVolumeForEdge[edgeJ] >= minVolume) continue;
+			// If an arc is divided into pieces, the boxes are searched piece by piece: for the pieces that are
+			// still in the search, and that have normals that are perpendicular to each other. Except when the
+			// third edges are found by trying all the sidepodal edges of edge i, which would be done all over
+			// for each pair of pieces: then the two arcs are searched as they are, if there is such a pair of
+			// pieces at all.
+			const bool pieces1 = dividedArcs && piecesBegin[i] < piecesEnd[i], pieces2 = dividedArcs && piecesBegin[edgeJ] < piecesEnd[edgeJ];
+			int begin1 = pieces1 ? piecesBegin[i] : (int)i, end1 = pieces1 ? piecesEnd[i] : (int)i + 1;
+			int begin2 = pieces2 ? piecesBegin[edgeJ] : edgeJ, end2 = pieces2 ? piecesEnd[edgeJ] : edgeJ + 1;
+			bool asTheyAre = !pieces1 && !pieces2;
+			if (!asTheyAre && compatibleEdgesEnd[i] - compatibleEdgesBegin[i] <= maxEdgesToTryAll)
 			{
-				searchDir = cross(f1a, f2a);
-				if (Normalize(searchDir) == 0.f)
-					searchDir = Perpendicular(f1a);
-			}
-
-			// Often the vertices that the searches for the extreme vertices would start from are enough to tell
-			// that these two edges are of no use.
-			// (When the two arcs together are longer than about 60 degrees, the bound says nothing.)
-			const bool boundThirdWidth = len > 0.f && arcChord[i] + arcChord[edgeJ] < 0.5f;
-			if (boundThirdWidth && pairWidth * thirdWidthBound(i, edgeJ, searchDir, len, extremeVertexSearchHint(searchDir), extremeVertexSearchHint(-searchDir)) >= minVolume)
-				continue;
-
-			// The normal of the box face that is flush with one of the two edges is the direction of an axis of
-			// the boxes that are flush with the other edge: it has to be in a sector that is of use to that edge.
-			// (For edge J as an axis of the boxes of edge i, that is so: it is in the list of edge i.)
-			if (openSectors[edgeJ] != ~0ULL)
-			{
-				vec3 basisU, basisV;
-				PerpendicularBasis(arcMiddle[edgeJ], basisU, basisV);
-				if ((openSectors[edgeJ] & SectorsOfPerpendicularNormals(f1a, f1b, dot(f1a, f2a), dot(f1a, f2b), dot(f1b, f2a), dot(f1b, f2b), basisU, basisV)) == 0)
+				for (int arc1 = begin1; arc1 < end1 && !asTheyAre; ++arc1)
+					for (int arc2 = begin2; arc2 < end2 && !asTheyAre && minVolumeForEdge[arc1] < minVolume; ++arc2)
+						asTheyAre = minVolumeForEdge[arc2] < minVolume && CanBePerpendicular(edgeNormalA[arc1], edgeNormalB[arc1], edgeNormalA[arc2], edgeNormalB[arc2]);
+				if (!asTheyAre)
 					continue;
+				begin1 = (int)i, end1 = (int)i + 1, begin2 = edgeJ, end2 = edgeJ + 1;
 			}
-
-			// Tests the box that has its faces flush with the edges i, J and K, if there is one. Returns whether
-			// the third axis of any box that is flush with the edges i and J can be on the arc of edge K at all.
-			const float axisDot = dot(arcAxis[i], arcAxis[edgeJ]);
-			const float axisTolerance = 1e-5f;
-			++pairNumber;
-			auto testThirdEdge = [&](int edgeK) -> bool
-			{
-				const vec3 &f3a = edgeNormalA[edgeK];
-				const vec3 &f3b = edgeNormalB[edgeK];
-				TRACE_INC(thirdEdgesTested);
-				float range[2];
-				if (!CanBeThirdAxis(f1a, f1b, arcAxis[i], f2a, f2b, arcAxis[edgeJ], axisDot, axisTolerance, f3a, f3b, arcLengthSq[edgeK], range))
-					return false;
-
-				// If the third axis is at an end of the arc, it is the normal of a face of the hull, and all the
-				// edges of that face give the same box: one of them is enough.
-				if (range[1] < 1e-3f || range[0] > 1.f - 1e-3f)
-				{
-					const int face = range[1] < 1e-3f ? facesForEdge[edgeK].second : facesForEdge[edgeK].first;
-					if (faceTestedForPair[face] == pairNumber)
-						return true;
-					if (edgeJ < edgeK)
-						faceTestedForPair[face] = pairNumber;
-				}
-
-				// Test edge triplet i, edgeJ, edgeK.
-				if (edgeJ < edgeK && pairWidth * minWidth[edgeK] < minVolume && minVolumeForEdge[edgeK] < minVolume
-					&& !AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
-				{
-					vec3 n1[2], n2[2], n3[2];
-					TRACE_INC(edgeTriplets);
-					int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
-					for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
-					{
-						TRACE_INC(edgeTripletsSolved);
-						TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
-							edges, antipodalPointsForEdge, &minVolume, &minOBB);
-					}
-				}
-				return true;
-			};
-
-			// The third edge is sidepodal to edge i as well. If edge i has only few sidepodal edges, it is the
-			// fastest to simply try them all. Most of them are ruled out by where their arc is. The third axis is
-			// within `turn` of searchDir or its opposite (see thirdWidthBound(); the 2e-3 is for the tolerances of
-			// ComputeBasis()), so the middle of the arc has to be within that plus the distance to its ends. And
-			// the third axis is perpendicular to a normal on each of the two arcs, so its dot product with the
-			// middle of an arc is at most the distance from there to the ends of that arc: the arc of the third
-			// edge must have such a normal, which is tested for the shorter one of the two arcs.
-			if (compatibleEdgesEnd[i] - compatibleEdgesBegin[i] <= maxEdgesToTryAll)
-			{
-				TRACE_INC(edgePairsSearched);
-				const float turn = len > 0.f ? arcChord[i] + arcChord[edgeJ] + (1.f - len) + 2e-3f : 2.f;
-				const size_t shorter = arcChord[i] <= arcChord[edgeJ] ? i : (size_t)edgeJ;
-				const float tilt = arcChord[shorter] + 2e-3f;
-				for(size_t k = compatibleEdgesBegin[i]; k < compatibleEdgesEnd[i]; ++k)
-				{
-					const int edgeK = compatibleEdges[k];
-					const float reach = turn + arcChord[edgeK];
-					if (edgeK <= edgeJ || pairWidth * minWidth[edgeK] >= minVolume || fabsf(dot(arcMiddle[edgeK], searchDir)) < 1.f - 0.5f * reach * reach)
-						continue;
-					const float a = dot(arcMiddle[shorter], edgeNormalA[edgeK]), b = dot(arcMiddle[shorter], edgeNormalB[edgeK]);
-					if (fminf(a, b) <= tilt && fmaxf(a, b) >= -tilt)
-						testThirdEdge(edgeK);
-				}
-				continue;
-			}
-
-			// Otherwise find the extreme vertices of the hull along the third axis of a box that is flush with the
-			// two edges, of each family of such boxes. They also tell the best if the two edges are of any use.
-			// (The third axis of the first box points the same way as searchDir, except perhaps on arcs that are
-			// too long for the bound to say anything.)
-			thirdAxes.clear();
-			ThirdAxesOfBoxes(f1a, f1b, f2a, f2b, thirdAxes);
-			if (thirdAxes.empty())
-				thirdAxes.push_back(searchDir);
-			for(size_t k = 0; k < thirdAxes.size(); ++k)
-				for(int side = 0; side < 2; ++side)
-				{
-					const vec3 direction = side == 0 ? thirdAxes[k] : -thirdAxes[k];
-					int &hint = extremeVertexSearchHint(direction);
-					float dummy;
-					CLEAR_GRAPH_SEARCH();
-					hint = ExtremeVertexConvex(hull, adjacencyData, direction, floodFillVisited, floodFillVisitColor, dummy, hint); // O(log|V|)?
-					traverseStack.push_back(hint);
-				}
-			if (boundThirdWidth)
-			{
-				extremeVertexSearchHint(searchDir) = traverseStack[0];
-				extremeVertexSearchHint(-searchDir) = traverseStack[1];
-				if (pairWidth * thirdWidthBound(i, edgeJ, searchDir, len, traverseStack[0], traverseStack[1]) >= minVolume)
-				{
-					traverseStack.clear();
-					continue;
-				}
-			}
-			TRACE_INC(edgePairsSearched);
-
-			// Find the edges that the third face of the box can be flush with. Along a family of boxes, the third
-			// axis of the box moves over the normals of the hull: over the normals that a face can have when it
-			// touches the hull at a vertex, and from one vertex to a neighbor over the arc of normals of the edge
-			// between them, which is then such a third edge. So the search goes from the extreme vertices of a
-			// box of each family over those edges to their other vertices. (An edge is looked at only from the
-			// first of its vertices that the search comes to.)
-			CLEAR_GRAPH_SEARCH();
-			while(!traverseStack.empty())
-			{
-				int v = traverseStack.back();
-				traverseStack.pop_back();
-				if (HAVE_VISITED_VERTEX(v))
-					continue;
-				MARK_VERTEX_VISITED(v);
-				const std::vector<int> &n = adjacencyData[v];
-				for(size_t k = 0; k < n.size(); ++k)
-					// Edges inside faces with 180 degrees dihedral angles can be ignored.
-					if (!HAVE_VISITED_VERTEX(n[k]) && !IS_INTERNAL_EDGE(adjacentEdges[v][k]) && testThirdEdge(adjacentEdges[v][k]))
-						traverseStack.push_back(n[k]);
-			}
+			for (int arc1 = begin1; arc1 < end1; ++arc1)
+				for (int arc2 = begin2; arc2 < end2 && minVolumeForEdge[arc1] < minVolume; ++arc2)
+					if (minVolumeForEdge[arc2] < minVolume
+						&& (asTheyAre || CanBePerpendicular(edgeNormalA[arc1], edgeNormalB[arc1], edgeNormalA[arc2], edgeNormalB[arc2])))
+						searchPair(i, edgeJ, arc1, arc2);
 		}
 	}
 
