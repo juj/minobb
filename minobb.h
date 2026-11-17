@@ -14,7 +14,7 @@
 //      with a whole face of the convex hull.
 //
 // Typical usage is a two-pass run:
-//   Hull3 hull = convex_hull(pts, num_pts, stride_bytes);
+//   Hull3 hull = convex_hull(pts, num_pts, stride_bytes); // See convex_hull.h.
 //   OBB obb = minobb(hull);
 //
 // minobb() enumerates the candidate box orientations implied by the contact
@@ -24,39 +24,17 @@
 // axis direction the extreme input point is a hull vertex, so the resulting box
 // is exact for the full input at a fraction of the cost.
 //
-// Complexity: O(n^2) for the convex hull (convex_hull()) + O(E^3) configuration
-// enumeration for minobb() in the worst case (E = number of convex hull edges,
-// E <= 3n/2). Intended for small to medium sized point sets, not for
-// million-point meshes.
+// Complexity: O(n log n) typical for the convex hull (convex_hull()) + O(E^3)
+// configuration enumeration for minobb() in the worst case (E = number of
+// convex hull edges). The input can be large, as long as its hull is small to
+// medium sized.
 //
 // Degenerate input (all points in a plane, on a line, or a single point) is
 // handled by a 2D rotating-calipers / 1D fallback, producing a flat OBB.
 
 #pragma once
 
-#include <vector>
-
-// A minimal 3-component float vector.
-struct vec3
-{
-	float x, y, z;
-
-	vec3() : x(0.f), y(0.f), z(0.f) {}
-	vec3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
-
-	vec3 operator + (const vec3 &b) const { return vec3(x + b.x, y + b.y, z + b.z); }
-	vec3 operator - (const vec3 &b) const { return vec3(x - b.x, y - b.y, z - b.z); }
-	vec3 operator * (float s) const { return vec3(x * s, y * s, z * s); }
-	vec3 operator - () const { return vec3(-x, -y, -z); }
-	bool operator == (const vec3 &b) const { return x == b.x && y == b.y && z == b.z; }
-
-	vec3 &operator += (const vec3 &b) { x += b.x; y += b.y; z += b.z; return *this; }
-	vec3 &operator -= (const vec3 &b) { x -= b.x; y -= b.y; z -= b.z; return *this; }
-	vec3 &operator *= (float s) { x *= s; y *= s; z *= s; return *this; }
-
-	float &operator[](int i) { float *p = &x; return p[i]; }
-	float operator[](int i) const { const float *p = &x; return p[i]; }
-};
+#include "convex_hull.h" // vec3, Hull3, convex_hull()
 
 // Dot and cross product of two vectors.
 float dot(const vec3 &a, const vec3 &b);
@@ -84,46 +62,23 @@ struct OBB
 	float Distance(const vec3 &p) const;
 };
 
-struct Hull3; // Forward declaration (defined below).
-
 // Computes the minimum-volume OBB (conjectured, see Theorem 7.1 of the paper)
 // enclosing the given convex hull (and hence the point set the hull was
 // computed from).
 //
 // `hull` must be the result of convex_hull() for the point set of interest.
 // For degenerate (planar/collinear/single-point) hulls a flat OBB is returned
-// via a 2D rotating-calipers / 1D fallback.
+// via a 2D rotating-calipers / 1D fallback. A hull that is flat to the
+// precision of single precision floats (thinner than 2e-6 times its size) gets
+// the box with the smallest area instead of the smallest volume: at that
+// thickness the volume of a box with float axes is rounding noise.
+//
+// The returned box contains all the vertices of the hull, and its axes are
+// orthonormal, both to the precision of floats. (Far away from the origin the
+// box center cannot be represented accurately, and the box is then grown by
+// the rounding error of its center.)
 //
 // Returns a degenerate OBB (IsDegenerate() == true) if the hull has no
-// vertices.
+// vertices, or if it is too large: the search needs E*V bits of working
+// memory (E edges, V vertices), and gives up if that is more than 4 GB.
 OBB minobb(const Hull3 &hull);
-
-// A triangle mesh representing a convex hull: vertices `v` and triangular
-// faces `f` (indices into `v`), CCW oriented from outside.
-struct Hull3
-{
-	std::vector<vec3> v;  // Hull vertices.
-	std::vector<std::vector<int>> f; // Hull faces (triangles), CCW oriented from outside.
-	bool degenerate = false;
-
-	// True if the input was planar, collinear, or a single point, i.e. the hull
-	// is not a solid polyhedron. In that case v/f hold the 2D convex hull: a
-	// flat polygon (corner points + coplanar fan triangles, all face normals
-	// pointing the same way), a line segment (two endpoints, no faces), or a
-	// single point.
-	bool IsDegenerate() const { return degenerate; }
-};
-
-// Computes the convex hull of the point set.
-//
-// `pts` points to an array of `num_pts` xyz point triples in floats.
-// `stride_bytes` is the byte stride between consecutive points (e.g. 12 for
-// tightly packed floats, or larger if the points are embedded in a struct).
-// Exact duplicate points are discarded. Interior points are not part of the
-// hull output.
-//
-// The hull is degenerate (IsDegenerate() == true) if the points are planar,
-// collinear, or there are fewer than 4 distinct points. For planar input the
-// hull is the 2D convex polygon of the point set (flat, zero volume); for
-// collinear input it is the diameter segment; for a single point, the point.
-Hull3 convex_hull(const float *pts, int num_pts, int stride_bytes);

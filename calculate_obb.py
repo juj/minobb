@@ -29,7 +29,7 @@ EXE = os.path.join(REPO_ROOT, "test", "minobb_glb.exe")
 BUILD_CMD = [
     "clang++", "-O3", "-std=c++17", "-I.",
     "-o", os.path.join("test", "minobb_glb.exe"),
-    "minobb.cpp", os.path.join("test", "minobb_glb.cpp"),
+    "minobb.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp"),
 ]
 
 
@@ -72,8 +72,11 @@ def compute_one(glb_path: str, timeout: float):
                 data = json.load(f)
             t = data.get("timing", {})
             total = float(t.get("hull_sec", 0.0)) + float(t.get("obb_sec", 0.0))
-        except (OSError, ValueError, TypeError):
-            total = None
+        except (OSError, ValueError, TypeError) as e:
+            return (glb_path, f"error (bad json: {e})", None)
+        # minobb() gives up on hulls whose search tables would not fit in memory.
+        if data.get("obb", {}).get("degenerate") and data.get("hull", {}).get("vertices"):
+            return (glb_path, "no obb (too large)", total)
         return (glb_path, "ok", total)
     except subprocess.TimeoutExpired:
 #        print(f'TIMEOUT, DELETING {glb_path}')

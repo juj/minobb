@@ -5,9 +5,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstring>
-#include <set>
-#include <map>
-#include <assert.h>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Optional per-stage profiling.
@@ -68,13 +66,6 @@ static long g_evcSteps = 0; // neighbor relaxations inside ExtremeVertexConvex()
 #define TRACE_EVC_RESET(bc, bs)     do { (bc) = g_evcCalls; (bs) = g_evcSteps; } while (0)
 #define TRACE_EVC_CALL_DELTA(bc)    (g_evcCalls - (bc))
 #define TRACE_EVC_STEP_DELTA(bs)    (g_evcSteps - (bs))
-#define TRACE_INSERT_REPORT(t0, tLoop, tScan, tHor, tReb, nPts, nVis, nFace, nPair) \
-	do { \
-		TraceFmt(TraceNow() - (tLoop), \
-			"hull: insert loop (face_scan=%.3f horizon=%.3f rebuild=%.3f; n=%zu visible_inserts=%ld face_checks=%ld horizon_pairs=%ld)", \
-			(double)(tScan), (double)(tHor), (double)(tReb), (nPts), (long)(nVis), (long)(nFace), (long)(nPair)); \
-		(void)(t0); \
-	} while (0)
 #else
 // Tracing disabled: every macro is a no-op. The (void) casts keep the timer
 // and counter locals "used" so that no warnings appear and the optimizer
@@ -89,8 +80,6 @@ static long g_evcSteps = 0; // neighbor relaxations inside ExtremeVertexConvex()
 #define TRACE_EVC_RESET(bc, bs)     do { (void)(bc); (void)(bs); } while (0)
 #define TRACE_EVC_CALL_DELTA(bc)    (0L)
 #define TRACE_EVC_STEP_DELTA(bs)    (0L)
-#define TRACE_INSERT_REPORT(t0, tLoop, tScan, tHor, tReb, nPts, nVis, nFace, nPair) \
-	do { (void)(t0); (void)(tLoop); (void)(tScan); (void)(tHor); (void)(tReb); (void)(nPts); (void)(nVis); (void)(nFace); (void)(nPair); } while (0)
 #endif
 
 float dot(const vec3 &a, const vec3 &b)
@@ -169,6 +158,29 @@ static void PerpendicularBasis(const vec3 &v, vec3 &outU, vec3 &outV)
 {
 	outU = Normalized(Perpendicular(v));
 	outV = Normalized(cross(outU, v));
+}
+
+// A double precision vector, for the steps where single precision is not accurate enough.
+struct dvec3
+{
+	double x, y, z;
+
+	dvec3() : x(0.0), y(0.0), z(0.0) {}
+	dvec3(double _x, double _y, double _z) : x(_x), y(_y), z(_z) {}
+	dvec3(const vec3 &v) : x(v.x), y(v.y), z(v.z) {}
+
+	dvec3 operator + (const dvec3 &b) const { return dvec3(x + b.x, y + b.y, z + b.z); }
+	dvec3 operator - (const dvec3 &b) const { return dvec3(x - b.x, y - b.y, z - b.z); }
+	dvec3 operator * (double s) const { return dvec3(x * s, y * s, z * s); }
+	vec3 ToFloat() const { return vec3((float)x, (float)y, (float)z); }
+};
+
+static double dot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static dvec3 cross(const dvec3 &a, const dvec3 &b) { return dvec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
+static dvec3 Normalized(const dvec3 &v)
+{
+	double len = sqrt(dot(v, v));
+	return len > 0.0 ? v * (1.0 / len) : v;
 }
 
 // ----------------------------------------------------------------------------
@@ -355,169 +367,8 @@ static float MinAreaRect2D(const float2 *inP, int n, float2 &center, float2 &uDi
 }
 
 // ----------------------------------------------------------------------------
-// 3D convex hull (simple incremental algorithm, O(n^2) typical)
+// Convex hull helpers
 // ----------------------------------------------------------------------------
-
-// Double-precision vector and operators for the hull predicates. The input
-// points are float32, and the point-vs-face-plane tests need more guard digits
-// than float leaves after the coordinates themselves: with float arithmetic a
-// coplanar point can measure "outside" a face by pure representation error,
-// which corrupts the visible-region topology. All hull construction is done in
-// double and converted back to float at the end (the hull vertices are original
-// input points, so the conversion is exact).
-struct dvec3
-{
-	dvec3() = default;
-	dvec3(double x, double y, double z):x(x), y(y), z(z) {}
-	dvec3(const vec3 &v):x(v.x), y(v.y), z(v.z) {}
-	double x, y, z;
-};
-static dvec3 dsub(const dvec3 &a, const dvec3 &b) { return dvec3(a.x - b.x, a.y - b.y, a.z - b.z); }
-static dvec3 dmul(const dvec3 &a, double s) { return dvec3(a.x * s, a.y * s, a.z * s); }
-static double ddot(const dvec3 &a, const dvec3 &b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-static dvec3 dcross(const dvec3 &a, const dvec3 &b)
-{
-	return dvec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
-}
-static double dlen2(const dvec3 &a) { return ddot(a, a); }
-static dvec3 dnormalize(const dvec3 &a)
-{
-	double l = std::sqrt(dlen2(a));
-	return l > 0.0 ? dmul(a, 1.0 / l) : dvec3{0.0, 0.0, 0.0};
-}
-
-// 2D convex hull (Andrew's monotone chain, double precision) for degenerate
-// (planar or collinear) point sets. Projects the points onto their plane using
-// the basis (lineDir, w) derived from the bootstrap points ia/ib/ic, and returns
-// the flat polygon as a Hull3 with degenerate = true: a fan triangulation for
-// the planar case, a bare vertex list for the collinear / single-point cases.
-static Hull3 BuildPlanarHull(const std::vector<vec3> &pts, const std::vector<dvec3> &P,
-				       int n, int ia, int ib, int ic, const dvec3 &lineDir, double scale)
-{
-	Hull3 hull;
-	hull.degenerate = true;
-	if (n == 1)
-	{
-		hull.v.push_back(pts[0]);
-		return hull;
-	}
-	dvec3 icRel = dsub(P[ic], P[ia]);
-	double icDist = std::sqrt(dlen2(dsub(icRel, dmul(lineDir, ddot(lineDir, icRel)))));
-	if (icDist <= 1e-9 * scale)
-	{
-		// Collinear: the hull is the diameter segment.
-		hull.v.push_back(pts[ia]);
-		hull.v.push_back(pts[ib]);
-		return hull;
-	}
-	// Plane basis: u = lineDir (near-diameter direction), w = the
-	// perpendicular direction in the plane.
-	dvec3 w = dnormalize(dsub(icRel, dmul(lineDir, ddot(lineDir, icRel))));
-	// Project all points to the plane and run Andrew's monotone chain.
-	struct P2 { double s, t; int idx; };
-	std::vector<P2> q((size_t)n);
-	for (int i = 0; i < n; ++i)
-	{
-		dvec3 rel = dsub(P[i], P[ia]);
-		q[i] = P2{ ddot(lineDir, rel), ddot(w, rel), i };
-	}
-	std::sort(q.begin(), q.end(), [](const P2 &a, const P2 &b)
-	{
-		if (a.s != b.s) return a.s < b.s;
-		if (a.t != b.t) return a.t < b.t;
-		return a.idx < b.idx;
-	});
-	q.erase(std::unique(q.begin(), q.end(), [](const P2 &a, const P2 &b)
-	{ return a.s == b.s && a.t == b.t; }), q.end());
-	auto cross2 = [](const P2 &O, const P2 &A, const P2 &B)
-	{
-		return (A.s - O.s) * (B.t - O.t) - (A.t - O.t) * (B.s - O.s);
-	};
-	// Monotone chain: corners of the 2D convex hull in CCW order, no
-	// duplicated endpoint. Collinear edge points are dropped (only the
-	// extreme corners are kept).
-	std::vector<int> h2;
-	for (int i = 0; i < (int)q.size(); ++i)
-	{
-		while (h2.size() >= 2 &&
-			cross2(q[h2[h2.size() - 2]], q[h2[h2.size() - 1]], q[i]) <= 0.0)
-			h2.pop_back();
-		h2.push_back(i);
-	}
-	for (int i = (int)q.size() - 2, t = (int)h2.size() + 1; i >= 0; --i)
-	{
-		while (h2.size() > (size_t)t &&
-			cross2(q[h2[h2.size() - 2]], q[h2[h2.size() - 1]], q[i]) <= 0.0)
-			h2.pop_back();
-		h2.push_back(i);
-	}
-	if (!h2.empty())
-		h2.pop_back(); // Drop the duplicated first point.
-	hull.v.reserve(h2.size());
-	for (int i : h2)
-		hull.v.push_back(pts[q[i].idx]);
-	if (h2.size() >= 3)
-	{
-		// Fan-triangulate the flat polygon, orienting all faces so their
-		// normals point the same way (the +u x w plane normal).
-		dvec3 nPlane = dcross(lineDir, w);
-		for (size_t i = 1; i + 1 < h2.size(); ++i)
-		{
-			int a = 0, b = (int)i, c = (int)(i + 1);
-			vec3 n3 = cross(hull.v[b] - hull.v[a], hull.v[c] - hull.v[a]);
-			dvec3 n3d = dvec3{ (double)n3.x, (double)n3.y, (double)n3.z };
-			if (ddot(n3d, nPlane) < 0.0)
-				std::swap(b, c);
-			hull.f.push_back({ a, b, c });
-		}
-	}
-	return hull;
-}
-
-// Validates a hull built in double precision:
-//  - every undirected edge belongs to exactly two faces,
-//  - the Euler characteristic holds (F == 2*V - 4 for a closed convex polyhedron),
-//  - no face has zero area,
-//  - every vertex lies on or behind every face plane, within the coplanarity
-//    tolerance (convexity / outward orientation).
-static bool HullValid(const std::vector<dvec3> &v, const std::vector<std::vector<int>> &f, double scale)
-{
-	const double eps = 1e-6 * scale;
-	const size_t V = v.size(), F = f.size();
-	if (F != 2 * V - 4)
-		return false;
-	std::multiset<std::pair<int, int>> edges;
-	for (size_t fi = 0; fi < F; ++fi)
-		for (int j = 0; j < 3; ++j)
-		{
-			int a = f[fi][j], b = f[fi][(j + 1) % 3];
-			edges.insert(std::make_pair(std::min(a, b), std::max(a, b)));
-		}
-	for (auto it = edges.begin(); it != edges.end(); )
-	{
-		auto range = edges.equal_range(*it);
-		if (std::distance(range.first, range.second) != 2)
-			return false;
-		it = range.second;
-	}
-	for (size_t fi = 0; fi < F; ++fi)
-	{
-		const std::vector<int> &face = f[fi];
-		dvec3 n = dcross(dsub(v[face[1]], v[face[0]]), dsub(v[face[2]], v[face[0]]));
-		if (dlen2(n) <= 0.0)
-			return false; // Degenerate (zero-area) face.
-		const double nlen = std::sqrt(dlen2(n));
-		for (size_t vi = 0; vi < V; ++vi)
-		{
-			int idx = (int)vi;
-			if (idx == face[0] || idx == face[1] || idx == face[2])
-				continue;
-			if (ddot(n, dsub(v[idx], v[face[0]])) > eps * nlen)
-				return false; // A vertex pokes through the face: non-convex.
-		}
-	}
-	return true;
-}
 
 static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &hull)
 {
@@ -538,586 +389,16 @@ static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &h
 	return adjacencyData;
 }
 
-vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
+// Returns the unit normal of a face of the hull. Computed in double precision as the sum of the cross
+// products of a triangle fan of the face (i.e. Newell's method, relative to the first vertex), so that
+// also small and thin faces get an accurate normal.
+static vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
 {
 	const std::vector<int> &face = poly.f[faceIndex];
-	if (face.size() == 3)
-	{
-		vec3 a = poly.v[face[0]];
-		vec3 b = poly.v[face[1]];
-		vec3 c = poly.v[face[2]];
-		return Normalized(cross(b-a, c-a));
-	}
-	else if (face.size() > 3)
-	{
-		// Use Newell's method of computing the face normal for best stability.
-		// See Christer Ericson, Real-Time Collision Detection, pp. 491-495.
-		vec3 normal(0, 0, 0);
-		int v0 = face.back();
-		for(size_t i = 0; i < face.size(); ++i)
-		{
-			int v1 = face[i];
-			normal.x += (float)((double(poly.v[v0].y) - poly.v[v1].y) * (double(poly.v[v0].z) + poly.v[v1].z)); // Project on yz
-			normal.y += (float)((double(poly.v[v0].z) - poly.v[v1].z) * (double(poly.v[v0].x) + poly.v[v1].x)); // Project on xz
-			normal.z += (float)((double(poly.v[v0].x) - poly.v[v1].x) * (double(poly.v[v0].y) + poly.v[v1].y)); // Project on xy
-			v0 = v1;
-		}
-		return Normalized(normal);
-	}
-	else if (face.size() == 2)
-		return Normalized(cross(poly.v[face[1]] - poly.v[face[0]], Perpendicular(poly.v[face[0]] - poly.v[face[1]]) - poly.v[face[0]]));
-	else if (face.size() == 1)
-		return vec3(0, 1, 0);
-	else
-		return vec3(std::nanf(""), std::nanf(""), std::nanf(""));
-}
-
-static void PolyExtremeVertexOnFace(const Hull3 &poly, int face, const vec3 &dir, float &outMin, float &outMax)
-{
-	outMin = FLT_MAX;
-	outMax = -FLT_MAX;
-	for(size_t i = 0; i < poly.f[face].size(); ++i)
-	{
-		float d = dot(dir, poly.v[poly.f[face][i]]);
-		outMin = fminf(outMin, d);
-		outMax = fmaxf(outMax, d);
-	}
-}
-
-void RemoveDegenerateFaces(Hull3 &hull)
-{
-	size_t n = 0;
-	for(size_t i = 0; i < hull.f.size(); ++i)
-	{
-		if (hull.f[i].size() >= 3)
-		{
-			if (n != i)
-				hull.f[n] = hull.f[i];
-			++n;
-		}
-	}
-	hull.f.erase(hull.f.begin()+n, hull.f.end());
-}
-
-/** Does a binary search on the array list that is sorted in ascending order.
-	@param list [in] A pointer to the array to search.
-	@param numItems The number of elements in the array 'list'.
-	@param value The element to search for.
-	@param cmp The comparison operator to use. The comparison function is of form
-		int CmpFunc(const T &a, const T &b), and it tests the mutual order of a and b.
-		It should return -1 if a < b, +1 if a > b, and 0 if a == b.
-	@return The index where a matching element lies, or -1 if not found. Note that if there are more than
-	        one matching element, the first that is found is returned. */
-template<typename T>
-int ArrayBinarySearch(const T *list, int numItems, const T &value)
-{
-	int left = 0;
-	int right = numItems-1;
-	int order = list[left] - value;
-	if (order > 0) return -1;
-	if (order == 0) return left;
-
-	order = list[right] - value;
-	if (order < 0) return -1;
-	if (order == 0) return right;
-
-	int round = 0; // Counter to alternatingly round up or down.
-	do
-	{
-		int middle = (left + right + round) / 2;
-		round = (round+1)&1;
-		order = list[middle] - value;
-		if (order == 0)
-			return middle;
-		if (order < 0)
-			left = middle;
-		else right = middle;
-	} while(left < right);
-	return -1;
-}
-
-void RemoveRedundantVertices(Hull3 &hull)
-{
-	std::set<int> usedVertices;
-
-	// Gather all used vertices.
-	for(size_t i = 0; i < hull.f.size(); ++i)
-		for(size_t j = 0; j < hull.f[i].size(); ++j)
-			usedVertices.insert(hull.f[i][j]);
-
-	// Turn the used vertices set into a vector for random access.
-	std::vector<int> usedVerticesArray;
-	usedVerticesArray.reserve(usedVertices.size());
-	for(std::set<int>::iterator iter = usedVertices.begin(); iter != usedVertices.end(); ++iter)
-		usedVerticesArray.push_back(*iter);
-
-	// Shift all face indices to point to the new vertex array.
-	for(size_t i = 0; i < hull.f.size(); ++i)
-		for(size_t j = 0; j < hull.f[i].size(); ++j)
-		{
-			int oldIndex = hull.f[i][j];
-			int newIndex = ArrayBinarySearch(&usedVerticesArray[0], (int)usedVerticesArray.size(), oldIndex);
-			assert(newIndex != -1);
-			hull.f[i][j] = newIndex;
-		}
-
-	// Delete all unused vertices from the vertex array.
-	for(size_t i = 0; i < usedVerticesArray.size(); ++i)
-		hull.v[i] = hull.v[usedVerticesArray[i]];
-	hull.v.resize(usedVerticesArray.size());
-}
-
-int merge_coplanar_faces(Hull3 &hull, bool snapVerticesToMergedPlanes, bool conservativeEnclose = true, float angleEpsilon = 1e-4f, float distanceEpsilon = 1e-4f)
-{
-	std::vector<vec3> faceNormals;
-	faceNormals.reserve(hull.f.size());
-
-	for(size_t i = 0; i < hull.f.size(); ++i)
-	{
-		std::vector<int> &face = hull.f[i];
-		if (face.size() < 3)
-		{
-			hull.f.erase(hull.f.begin()+i);
-			--i;
-			continue;
-		}
-		/*
-		vec3 a = v[face.v[0]];
-		vec3 b = v[face.v[1]];
-		vec3 c = v[face.v[2]];
-		vec3 normal = (b-a).Cross(c-a);
-		normal.Normalize();
-		*/
-		faceNormals.push_back(PolyhedronFaceNormal(hull, (int)i));
-	}
-
-	std::vector<int> faceGroups(hull.f.size());
-	for(size_t i = 0; i < hull.f.size(); ++i)
-		faceGroups[i] = (int)i;
-
-	int numMerges = 0;
-	std::map<std::pair<int, int>, int> verticesToFaces;
-	for(size_t i = 0; i < hull.f.size(); ++i)
-	{
-		std::vector<int> &face = hull.f[i];
-
-		// First register all of this face's edges, then test for merges. The
-		// merge below breaks out of the test loop; if registration and lookup
-		// were interleaved, the remaining edges would never be registered and
-		// later faces could not find this face as a coplanar neighbor through
-		// them (e.g. a triangle sharing an edge with the *last* edge of an
-		// already-merged face would be orphaned).
-		int v0 = face.back();
-		for(size_t j = 0; j < face.size(); ++j)
-		{
-			int v1 = face[j];
-			verticesToFaces[std::make_pair(v0, v1)] = (int)i;
-			v0 = v1;
-		}
-
-		v0 = face.back();
-		for(size_t j = 0; j < face.size(); ++j)
-		{
-			int v1 = face[j];
-			std::map<std::pair<int, int>, int>::iterator neighbor = verticesToFaces.find(std::make_pair(v1, v0));
-			if (neighbor != verticesToFaces.end())
-			{
-				int nf = neighbor->second;
-				if (!hull.f[nf].empty())
-				{
-					vec3 thisNormal = faceNormals[i];
-					vec3 nghbNormal = faceNormals[nf];
-					if (dot(thisNormal, nghbNormal) >= 1.0 - angleEpsilon)
-					{
-						float eNeg, ePos, nNeg, nPos;
-						PolyExtremeVertexOnFace(hull, (int)i, nghbNormal, eNeg, ePos);
-						PolyExtremeVertexOnFace(hull, nf, thisNormal, nNeg, nPos);
-						if (ePos - eNeg <= distanceEpsilon && nPos - nNeg <= distanceEpsilon)
-						{
-							++numMerges;
-							// Merge this face to neighboring face.
-							int fg = (int)i;
-							while(faceGroups[fg] != fg)
-								fg = faceGroups[fg];
-							int nfgr = nf;
-							while(faceGroups[nfgr] != nfgr)
-								nfgr = faceGroups[nfgr];
-							faceGroups[fg] = nfgr;
-							break;
-						}
-					}
-				}
-			}
-			v0 = v1;
-		}
-	}
-
-	std::vector<std::set<std::pair<int, int> > > newEdgesPerFace(hull.f.size());
-	for(size_t i = 0; i < hull.f.size(); ++i)
-	{
-		std::vector<int> &face = hull.f[i];
-
-		int fg = (int)i;
-		while(faceGroups[fg] != fg)
-			fg = faceGroups[fg];
-
-		int v0 = face.back();
-		for(size_t j = 0; j < face.size(); ++j)
-		{
-			int v1 = face[j];
-
-			if (newEdgesPerFace[fg].find(std::make_pair(v1, v0)) != newEdgesPerFace[fg].end())
-			{
-				newEdgesPerFace[fg].erase(std::make_pair(v1, v0));
-			}
-			else
-			{
-				newEdgesPerFace[fg].insert(std::make_pair(v0, v1));
-			}
-
-			v0 = v1;
-		}
-	}
-
-	for(size_t i = 0; i < hull.f.size(); ++i)
-	{
-		std::vector<int> &face = hull.f[i];
-
-		std::vector<std::pair<int, int> > boundaryEdges(newEdgesPerFace[i].begin(), newEdgesPerFace[i].end());
-		for(size_t j = 0; j < boundaryEdges.size(); ++j)
-			for(size_t k = j+1; k < boundaryEdges.size(); ++k)
-				if (boundaryEdges[j].second == boundaryEdges[k].first)
-				{
-					std::swap(boundaryEdges[j+1], boundaryEdges[k]);
-					break;
-				}
-		face.clear();
-		for(size_t j = 0; j < boundaryEdges.size(); ++j)
-			face.push_back(boundaryEdges[j].first);
-
-		// Snap all vertices to the plane of the face.
-		if (snapVerticesToMergedPlanes)
-		{
-			// If conservativeEnclose == true, compute the maximum distance for the plane
-			// so it encloses all the points. Otherwise, compute the average.
-			float d = conservativeEnclose ? -FLT_MAX : 0;
-			for(size_t j = 0; j < face.size(); ++j)
-			{
-				int vtx = face[j];
-				if (conservativeEnclose)
-					d = fmaxf(d, dot(faceNormals[i], hull.v[vtx]));
-				else
-					d += dot(faceNormals[i], hull.v[vtx]);
-			}
-			if (!conservativeEnclose)
-				d /= (float)face.size();
-			for(size_t j = 0; j < face.size(); ++j)
-				hull.v[face[j]] += faceNormals[i] * (d - dot(faceNormals[i], hull.v[face[j]]));
-		}
-	}
-
-	RemoveDegenerateFaces(hull);
-	RemoveRedundantVertices(hull);
-
-	return numMerges;
-}
-
-static Hull3 ConvexHull3(const std::vector<vec3> &ptsIn)
-{
-	double t0 = TRACE_START();
-	Hull3 hull;
-	const int n = (int)ptsIn.size();
-	if (n == 0)
-	{
-		hull.degenerate = true;
-		return hull;
-	}
-
-	// Convert all input points to double precision and calculate model scale.
-	std::vector<dvec3> P((size_t)n);
-	double scale = 1.0;
-	for (int i = 0; i < n; ++i)
-	{
-		P[i] = ptsIn[i];
-		scale = std::max(scale, dlen2(P[i]));
-	}
-	TRACE_MARK(t0, "hull: dedup+sort+dvec3");
-	scale = std::sqrt(scale);
-	const double eps = 1e-6 * scale; // Coplanarity tolerance (true distance).
-
-	int ia = 0;
-
-	auto farthestFrom = [&](int from)
-	{
-		int best = -1;
-		double bestD = -1.0;
-		for (int i = 0; i < n; ++i)
-		{
-			double d = dlen2(dsub(P[i], P[from]));
-			if (d > bestD) { bestD = d; best = i; }
-		}
-		return best;
-	};
-	int ib = farthestFrom(ia);
-	{
-		int r = farthestFrom(ib);
-		if (dlen2(dsub(P[r], P[ia])) > dlen2(dsub(P[ib], P[ia])))
-			ib = r;
-	}
-	dvec3 lineDir = dnormalize(dsub(P[ib], P[ia]));
-	int ic = ia;
-	{
-		double bestD = -1.0;
-		for (int i = 0; i < n; ++i)
-		{
-			dvec3 rel = dsub(P[i], P[ia]);
-			dvec3 perp = dsub(rel, dmul(lineDir, ddot(lineDir, rel)));
-			double d = dlen2(perp);
-			if (d > bestD) { bestD = d; ic = i; }
-		}
-	}
-	dvec3 baseN = dcross(dsub(P[ib], P[ia]), dsub(P[ic], P[ia]));
-	int id = ia;
-	{
-		double bestD = -1.0;
-		for (int i = 0; i < n; ++i)
-		{
-			double d = std::fabs(ddot(baseN, dsub(P[i], P[ia])));
-			if (d > bestD) { bestD = d; id = i; }
-		}
-	}
-	const double baseNLen = std::sqrt(dlen2(baseN));
-	const double tetThickness = baseNLen > 0.0
-		? std::fabs(ddot(baseN, dsub(P[id], P[ia]))) / baseNLen : 0.0;
-	TRACE_MARK(t0, "hull: bootstrap (O(n) passes)");
-	if (baseNLen <= 1e-9 * scale || tetThickness <= 1e-9 * scale)
-		// The points are planar, collinear, or there are fewer than 4 non-coplanar
-		// unique points: return a flat 2D convex hull instead of a solid polyhedron.
-		return BuildPlanarHull(pts, P, n, ia, ib, ic, lineDir, scale);
-
-	// Incremental construction in double precision. `order` is the insertion
-	// order of the remaining points. The result is order-independent in exact
-	// arithmetic, but for near-coplanar inputs micro-slivers can occur whose
-	// occurrence is order-dependent, so the caller validates the result and can
-	// retry with a different order.
-	auto buildWithOrder = [&](const std::vector<int> &order,
-					    std::vector<dvec3> &hv, std::vector<std::vector<int>> &hf)
-	{
-		hv.clear();
-		hf.clear();
-		hv.push_back(P[ia]);
-		hv.push_back(P[ib]);
-		hv.push_back(P[ic]);
-		hv.push_back(P[id]);
-
-		// Add a face, making sure it is oriented CCW from outside (the normal points
-		// away from the interior, i.e. away from the given reference point `ref`).
-		auto addFace = [&](int a, int b, int c, int ref)
-		{
-			dvec3 n = dcross(dsub(hv[b], hv[a]), dsub(hv[c], hv[a]));
-			if (ddot(n, dsub(hv[ref], hv[a])) > 0.0)
-				std::swap(b, c); // Normal points towards the interior, flip.
-			hf.push_back({ a, b, c });
-		};
-		addFace(0, 1, 2, 3);
-		addFace(0, 1, 3, 2);
-		addFace(0, 2, 3, 1);
-		addFace(1, 2, 3, 0);
-
-		// Profiling state for the insertion loop (all access goes through the
-		// TRACE_* macros; when PERF_TRACING_ENABLED is off this is inert).
-		long faceChecks = 0, visibleInserts = 0, horizonPairs = 0;
-		double tScan = 0.0, tHorizon = 0.0, tRebuild = 0.0;
-		double tLoop = TRACE_START();
-		for (int oi = 0; oi < (int)order.size(); ++oi)
-		{
-			int i = order[oi];
-			if (i == ia || i == ib || i == ic || i == id)
-				continue;
-			const dvec3 &q = P[i];
-
-			// Find all faces visible from q.
-			double t = TRACE_START();
-			std::vector<int> visible;
-			for (size_t fi = 0; fi < hf.size(); ++fi)
-			{
-				const std::vector<int> &face = hf[fi];
-				dvec3 n = dnormalize(dcross(dsub(hv[face[1]], hv[face[0]]), dsub(hv[face[2]], hv[face[0]])));
-				// Distance from q to the face plane (positive = outside the hull).
-				double dist = ddot(n, dsub(q, hv[face[0]]));
-				TRACE_INC(faceChecks);
-				if (dist > eps)
-					visible.push_back((int)fi);
-			}
-			TRACE_TICK(t, tScan);
-			if (visible.empty())
-				continue; // q is inside (or on) the hull.
-			TRACE_INC(visibleInserts);
-
-			// Collect the horizon: directed edges of the visible region that border a
-			// non-visible face.
-			struct DirEdge { int a, b; };
-			std::vector<DirEdge> visEdges;
-			for (int fi : visible)
-			{
-				const std::vector<int> &face = hf[fi];
-				visEdges.push_back({ face[0], face[1] });
-				visEdges.push_back({ face[1], face[2] });
-				visEdges.push_back({ face[2], face[0] });
-			}
-			t = TRACE_START();
-			std::vector<DirEdge> horizon;
-			for (const DirEdge &e : visEdges)
-			{
-				bool hasReverse = false;
-				for (const DirEdge &o : visEdges)
-				{
-					TRACE_INC(horizonPairs);
-					if (o.a == e.b && o.b == e.a)
-						hasReverse = true;
-				}
-				if (!hasReverse)
-					horizon.push_back(e);
-			}
-			TRACE_TICK(t, tHorizon);
-
-			int qIdx = (int)hv.size();
-			hv.push_back(q);
-
-			// Rebuild the faces: keep the non-visible ones, add a new face for each horizon edge.
-			t = TRACE_START();
-			std::vector<std::vector<int>> newFaces;
-			newFaces.reserve(hf.size());
-			for (size_t fi = 0; fi < hf.size(); ++fi)
-			{
-				bool vis = false;
-				for (int vfi : visible)
-					if ((int)fi == vfi) { vis = true; break; }
-				if (!vis)
-					newFaces.push_back(hf[fi]);
-			}
-			for (const DirEdge &he : horizon)
-				newFaces.push_back({ he.a, he.b, qIdx }); // (a, b, q) is outward oriented (horizon runs CCW around the hole).
-			hf.swap(newFaces);
-			TRACE_TICK(t, tRebuild);
-		}
-		TRACE_INSERT_REPORT(t0, tLoop, tScan, tHorizon, tRebuild, order.size(), visibleInserts, faceChecks, horizonPairs);
-
-
-		// Robustness pass: ensure all face normals point strictly outward. On a
-		// valid convex hull every other vertex must lie on or behind the face plane.
-		double tRob = TRACE_START();
-		for (size_t fi = 0; fi < hf.size(); ++fi)
-		{
-			std::vector<int> &face = hf[fi];
-			dvec3 n = dcross(dsub(hv[face[1]], hv[face[0]]), dsub(hv[face[2]], hv[face[0]]));
-			const double nlen = std::sqrt(dlen2(n));
-			for (size_t vi = 0; vi < hv.size(); ++vi)
-			{
-				int idx = (int)vi;
-				if (idx == face[0] || idx == face[1] || idx == face[2])
-					continue;
-				if (ddot(n, dsub(hv[idx], hv[face[0]])) > eps * nlen)
-				{
-					std::swap(face[1], face[2]);
-					break;
-				}
-			}
-		}
-		TRACE_MARK(tRob, "hull: robustness pass (orient normals)");
-
-		// Remove vertices not referenced by any face (points that turned out to be
-		// interior during the incremental construction). The original
-		// Polyhedron::ConvexHull stores only the actual hull vertices; keeping the
-		// interior points around would make the antipodal search below O(E*n) in
-		// the input size instead of O(E*V_hull).
-		double tStrip = TRACE_START();
-		std::vector<unsigned char> used(hv.size(), 0);
-		for (size_t fi = 0; fi < hf.size(); ++fi)
-			for (int j = 0; j < 3; ++j)
-				used[hf[fi][j]] = 1;
-		std::vector<int> remap(hv.size(), -1);
-		std::vector<dvec3> newV;
-		newV.reserve(hv.size());
-		for (size_t i = 0; i < hv.size(); ++i)
-			if (used[i])
-			{
-				remap[i] = (int)newV.size();
-				newV.push_back(hv[i]);
-			}
-		for (size_t fi = 0; fi < hf.size(); ++fi)
-			for (int j = 0; j < 3; ++j)
-				hf[fi][j] = remap[hf[fi][j]];
-		hv.swap(newV);
-		TRACE_MARK(tStrip, "hull: strip interior verts");
-	};
-
-	std::vector<int> order((size_t)n);
-	for (int i = 0; i < n; ++i)
-		order[i] = i;
-
-	std::vector<dvec3> hv;
-	std::vector<std::vector<int>> hf;
-	buildWithOrder(order, hv, hf);
-	t0 = TRACE_START();
-	bool valid = HullValid(hv, hf, scale);
-	TRACE_MARK(t0, "hull: HullValid");
-	if (!valid)
-	{
-		// Retry with the reverse insertion order: near-coplanar micro-slivers are
-		// order-dependent, and a different order often builds a clean hull.
-		std::reverse(order.begin(), order.end());
-		std::vector<dvec3> hv2;
-		std::vector<std::vector<int>> hf2;
-		buildWithOrder(order, hv2, hf2);
-		bool valid2 = HullValid(hv2, hf2, scale);
-		TRACE_MARK(t0, "hull: retry (reverse order) + HullValid");
-		if (valid2)
-		{
-			hv = std::move(hv2);
-			hf = std::move(hf2);
-		}
-		// If neither order validates, keep the first result (best effort); the
-		// OBB search has its own fallbacks for imperfect hulls.
-	}
-
-	// Convert back to float. The hull vertices are original input points, so
-	// this is exact.
-	hull.v.reserve(hv.size());
-	for (size_t i = 0; i < hv.size(); ++i)
-		hull.v.push_back(vec3((float)hv[i].x, (float)hv[i].y, (float)hv[i].z));
-	hull.f = std::move(hf);
-	return hull;
-}
-
-Hull3 convex_hull(const float *pts, int num_pts, int stride_bytes)
-{
-	if (!pts || num_pts <= 0 || stride_bytes < 12)
-		return Hull3(); // Degenerate (no vertices, no faces).
-
-	// Copy the (possibly strided) input into a contiguous array, removing
-	// exact duplicates.
-	std::vector<vec3> points;
-	points.reserve(num_pts);
-	for (int i = 0; i < num_pts; ++i)
-	{
-		const float *p = (const float *)pts + (size_t)i * (stride_bytes / 4);
-		points.push_back(vec3(p[0], p[1], p[2]));
-	}
-	std::sort(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
-	{
-		if (a.x != b.x) return a.x < b.x;
-		if (a.y != b.y) return a.y < b.y;
-		return a.z < b.z;
-	});
-	points.erase(std::unique(points.begin(), points.end(), [](const vec3 &a, const vec3 &b)
-	{
-		return a.x == b.x && a.y == b.y && a.z == b.z;
-	}), points.end());
-
-	Hull3 hull = ConvexHull3(points);
-	merge_coplanar_faces(hull, true);
-	return hull;
+	dvec3 normal;
+	for(size_t i = 1; i + 1 < face.size(); ++i)
+		normal = normal + cross(dvec3(poly.v[face[i]]) - dvec3(poly.v[face[0]]), dvec3(poly.v[face[i+1]]) - dvec3(poly.v[face[0]]));
+	return Normalized(normal).ToFloat();
 }
 
 // ----------------------------------------------------------------------------
@@ -1441,7 +722,11 @@ static void MoveSign(float &dst, float &src)
 	}
 }
 
-// Port of ComputeBasis().
+// Port of ComputeBasis(): finds the orthonormal bases (n1, n2, n3) where each ni is in the arc between the two
+// face normals fia and fib of an edge, i.e. the boxes that are flush with the three edges on three mutually
+// adjacent faces. Solved in double precision and with relative thresholds: the coefficients below are
+// differences of products of the normals, which cancel heavily and are all tiny when the normals of each
+// edge are close to each other (which they are on finely tessellated hulls).
 static int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 	const vec3 &f2a, const vec3 &f2b,
 	const vec3 &f3a, const vec3 &f3b,
@@ -1449,91 +734,73 @@ static int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 	vec3 *n2,
 	vec3 *n3)
 {
-	const float eps = 1e-4f;
-	const float angleEps = 1e-3f;
+	const double eps = 1e-4;
+	const double angleEps = 1e-3;
 
+	// n1 = a + b*t, n2 = c + d*u, n3 = e + f*v, with t, u, v in [0, 1].
+	const dvec3 a = f1b;
+	const dvec3 b = dvec3(f1a) - dvec3(f1b);
+	const dvec3 c = f2b;
+	const dvec3 d = dvec3(f2a) - dvec3(f2b);
+	const dvec3 e = f3b;
+	const dvec3 f = dvec3(f3a) - dvec3(f3b);
+
+	const double g = dot(a, c)*dot(d, e) - dot(a, d)*dot(c, e);
+	const double h = dot(a, c)*dot(d, f) - dot(a, d)*dot(c, f);
+	const double i = dot(b, c)*dot(d, e) - dot(b, d)*dot(c, e);
+	const double j = dot(b, c)*dot(d, f) - dot(b, d)*dot(c, f);
+
+	const double k = g*dot(b, e) - dot(a, e)*i;
+	const double l = h*dot(b, e) + g*dot(b, f) - dot(a, f)*i - dot(a, e)*j;
+	const double m = h*dot(b, f) - dot(a, f)*j;
+
+	// Solve m*v^2 + l*v + k = 0.
+	double roots[2];
+	int nRoots = 0;
+	const double magnitude = std::max(fabs(k), std::max(fabs(l), fabs(m)));
+	if (fabs(m) <= 1e-12 * magnitude)
 	{
-		vec3 a = f1b;
-		vec3 b = f1a - f1b;
-		vec3 c = f2b;
-		vec3 d = f2a - f2b;
-		vec3 e = f3b;
-		vec3 f = f3a - f3b;
-
-		float g = dot(a, c)*dot(d, e) - dot(a, d)*dot(c, e);
-		float h = dot(a, c)*dot(d, f) - dot(a, d)*dot(c, f);
-		float i = dot(b, c)*dot(d, e) - dot(b, d)*dot(c, e);
-		float j = dot(b, c)*dot(d, f) - dot(b, d)*dot(c, f);
-
-		float k = g*dot(b, e) - dot(a, e)*i;
-		float l = h*dot(b, e) + g*dot(b, f) - dot(a, f)*i - dot(a, e)*j;
-		float m = h*dot(b, f) - dot(a, f)*j;
-
-		float s = l*l - 4.f*m*k;
-
-		if (fabsf(m) < 1e-5f || fabsf(s) < 1e-5f)
-		{
-			// The equation is linear instead.
-			float v = -k / l;
-			float t = -(g + h*v) / (i + j*v);
-			float u = -(dot(c, e) + dot(c, f)*v) / (dot(d, e) + dot(d, f)*v);
-			int nSolutions = 0;
-			// If we happened to divide by zero above, the following checks handle them.
-			if (v >= -eps && t >= -eps && u >= -eps && v <= 1.f + eps && t <= 1.f + eps && u <= 1.f + eps)
-			{
-				n1[0] = Normalized(a + b*t);
-				n2[0] = Normalized(c + d*u);
-				n3[0] = Normalized(e + f*v);
-				if (fabsf(dot(n1[0], n2[0])) < angleEps
-					&& fabsf(dot(n1[0], n3[0])) < angleEps
-					&& fabsf(dot(n2[0], n3[0])) < angleEps)
-					return 1;
-				else
-					return 0;
-			}
-			return nSolutions;
-		}
-
-		if (s < 0.f)
-			return 0; // Discriminant negative, no solutions for v.
-
-		float sgnL = l < 0.f ? -1.f : 1.f;
-		float V1 = -(l + sgnL*(float)sqrt((double)s)) / (2.f*m);
-		float V2 = k / (m*V1);
-
-		float T1 = -(g + h*V1) / (i + j*V1);
-		float T2 = -(g + h*V2) / (i + j*V2);
-
-		float U1 = -(dot(c, e) + dot(c, f)*V1) / (dot(d, e) + dot(d, f)*V1);
-		float U2 = -(dot(c, e) + dot(c, f)*V2) / (dot(d, e) + dot(d, f)*V2);
-
-		int nSolutions = 0;
-		if (V1 >= -eps && T1 >= -eps && U1 >= -eps && V1 <= 1.f + eps && T1 <= 1.f + eps && U1 <= 1.f + eps)
-		{
-			n1[nSolutions] = Normalized(a + b*T1);
-			n2[nSolutions] = Normalized(c + d*U1);
-			n3[nSolutions] = Normalized(e + f*V1);
-
-			if (fabsf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
-				&& fabsf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
-				&& fabsf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
-				++nSolutions;
-		}
-		if (V2 >= -eps && T2 >= -eps && U2 >= -eps && V2 <= 1.f + eps && T2 <= 1.f + eps && U2 <= 1.f + eps)
-		{
-			n1[nSolutions] = Normalized(a + b*T2);
-			n2[nSolutions] = Normalized(c + d*U2);
-			n3[nSolutions] = Normalized(e + f*V2);
-			if (fabsf(dot(n1[nSolutions], n2[nSolutions])) < angleEps
-				&& fabsf(dot(n1[nSolutions], n3[nSolutions])) < angleEps
-				&& fabsf(dot(n2[nSolutions], n3[nSolutions])) < angleEps)
-				++nSolutions;
-		}
-		if (s < 1e-4f && nSolutions == 2)
-			nSolutions = 1;
-
-		return nSolutions;
+		// The equation is linear instead.
+		if (fabs(l) > 1e-12 * magnitude)
+			roots[nRoots++] = -k / l;
 	}
+	else
+	{
+		double s = l*l - 4.0*m*k;
+		if (s < 0.0 && s > -1e-12 * std::max(l*l, fabs(4.0*m*k)))
+			s = 0.0; // A double root, up to rounding.
+		if (s < 0.0)
+			return 0; // Discriminant negative, no solutions for v.
+		const double q = -0.5 * (l + (l < 0.0 ? -1.0 : 1.0) * sqrt(s));
+		roots[nRoots++] = q / m;
+		if (s > 0.0 && q != 0.0)
+			roots[nRoots++] = k / q;
+	}
+
+	int nSolutions = 0;
+	for (int r = 0; r < nRoots; ++r)
+	{
+		const double v = roots[r];
+		const double t = -(g + h*v) / (i + j*v);
+		const double u = -(dot(c, e) + dot(c, f)*v) / (dot(d, e) + dot(d, f)*v);
+		// If we happened to divide by zero above, the following checks handle them.
+		if (v >= -eps && t >= -eps && u >= -eps && v <= 1.0 + eps && t <= 1.0 + eps && u <= 1.0 + eps)
+		{
+			const dvec3 N1 = Normalized(a + b*t);
+			const dvec3 N2 = Normalized(c + d*u);
+			const dvec3 N3 = Normalized(e + f*v);
+			if (fabs(dot(N1, N2)) < angleEps
+				&& fabs(dot(N1, N3)) < angleEps
+				&& fabs(dot(N2, N3)) < angleEps)
+			{
+				n1[nSolutions] = N1.ToFloat();
+				n2[nSolutions] = N2.ToFloat();
+				n3[nSolutions] = N3.ToFloat();
+				++nSolutions;
+			}
+		}
+	}
+	return nSolutions;
 }
 
 // Port of AreEdgesCompatibleForOBB().
@@ -1693,6 +960,26 @@ static bool AreEdgesBad(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const
 #endif
 }
 
+// Makes the box with the axes n1 and n2 (and their cross product) the best box, if it is smaller than
+// the best box so far. `volume` is the volume that the search derived for it from the vertices it assumed
+// the box to be in contact with: that can only be smaller than the volume of the actual tightest box of
+// that orientation, which therefore is measured only if `volume` is below the best volume so far.
+static void TestBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &n2, float volume,
+	float *minVolume, OBB *minOBB)
+{
+	if (!(volume < *minVolume))
+		return;
+	// The axes must be (roughly) orthonormal for this to be a box at all. This also catches zero vectors and NaNs.
+	if (!(fabsf(LengthSq(n1) - 1.f) < 0.01f && fabsf(LengthSq(n2) - 1.f) < 0.01f && fabsf(dot(n1, n2)) < 0.01f))
+		return;
+	OBB obb = FixedOrientationEnclosingOBB(hullV, n1, n2);
+	if (obb.Volume() < *minVolume)
+	{
+		*minOBB = obb;
+		*minVolume = obb.Volume();
+	}
+}
+
 // Port of TestThreeAdjacentFaces().
 static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 	int edgeI, int edgeJ, int edgeK,
@@ -1721,74 +1008,75 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 	float minN2 = minAlong(n2, antipodalPointsForEdge[edgeJ]);
 	float minN3 = minAlong(n3, antipodalPointsForEdge[edgeK]);
 	float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-	if (volume > 0.f && volume < *minVolume)
-	{
-		minOBB->axis[0] = n1;
-		minOBB->axis[1] = n2;
-		minOBB->axis[2] = n3;
-		minOBB->r = vec3(maxN1 - minN1, maxN2 - minN2, maxN3 - minN3) * 0.5f;
-		minOBB->pos = n1 * (minN1 + minOBB->r.x) + n2 * (minN2 + minOBB->r.y) + n3 * (minN3 + minOBB->r.z);
-		*minVolume = volume;
-	}
+	TestBox(hullV, n1, n2, volume, minVolume, minOBB);
 }
 
-int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, 
+// Finds the vertex of the hull that is the farthest along `direction`, by climbing along the edges of the
+// hull, starting from startingVertex. On a convex polyhedron the vertices that are at least as far as any
+// given distance are connected, so the climb can only come to a halt too early where vertices tie: on a
+// face or an edge that is perpendicular to the direction, to the precision of the distances. Such a
+// plateau is therefore searched through for a vertex that is farther still.
+// If `ties` is given, the returned vertex and all the vertices that tie with it are appended to it.
+static int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction,
 	std::vector<unsigned int> &floodFillVisited, unsigned int floodFillVisitColor,
-	float &mostExtremeDistance, int startingVertex)
+	float &mostExtremeDistance, int startingVertex, std::vector<int> *ties = 0)
 {
-#ifdef MATH_NUMSTEPS_STATS
-	numSearchStepsDone = 0;
-	numImprovementsMade = 0;
-#endif
 	TRACE_EVC_CALL();
-	float curD = dot(direction, hull.v[startingVertex]);
-	const int *neighbors = &adjacencyData[startingVertex][0];
-	const int *neighborsEnd = neighbors + adjacencyData[startingVertex].size();
-	floodFillVisited[startingVertex] = floodFillVisitColor;
+	const float plateauEpsilon = 1e-4f;
+	static thread_local std::vector<int> plateau, visited;
+	plateau.clear();
+	visited.clear();
 
-	int secondBest = -1;
-	float secondBestD = curD - 1e-3f;
-	while(neighbors != neighborsEnd)
+	float curD = dot(direction, hull.v[startingVertex]);
+	floodFillVisited[startingVertex] = floodFillVisitColor;
+	if (ties) visited.push_back(startingVertex);
+	int v = startingVertex; // The vertex whose neighbors are examined: the farthest vertex so far, or one on its plateau.
+	while(v != -1)
 	{
-		TRACE_EVC_STEP();
-		int n = *neighbors++;
-		if (floodFillVisited[n] != floodFillVisitColor)
+		const std::vector<int> &neighbors = adjacencyData[v];
+		const int from = v;
+		v = -1;
+		for(size_t i = 0; i < neighbors.size(); ++i)
 		{
+			TRACE_EVC_STEP();
+			int n = neighbors[i];
+			if (floodFillVisited[n] == floodFillVisitColor)
+				continue;
 			float d = dot(direction, hull.v[n]);
+			if (d < curD - plateauEpsilon)
+				continue;
+			floodFillVisited[n] = floodFillVisitColor;
+			if (ties) visited.push_back(n);
 			if (d > curD)
 			{
-				startingVertex = n;
+				// Climb on from this neighbor. The remaining neighbors are looked at later, if still relevant.
+				plateau.push_back(from);
+				startingVertex = v = n;
 				curD = d;
-				floodFillVisited[startingVertex] = floodFillVisitColor;
-				neighbors = &adjacencyData[startingVertex][0];
-				neighborsEnd = neighbors + adjacencyData[startingVertex].size();
-				secondBest = -1;
-				secondBestD = curD - 1e-3f;
+				break;
 			}
-			else if (d > secondBestD)
-			{
-				secondBest = n;
-				secondBestD = d;
-			}
+			plateau.push_back(n);
 		}
-	}
-	if (secondBest != -1 && floodFillVisited[secondBest] != floodFillVisitColor)
-	{
-		float secondMostExtreme = -FLT_MAX;
-		int secondTry = ExtremeVertexConvex(hull, adjacencyData, direction, floodFillVisited, floodFillVisitColor, secondMostExtreme, secondBest);
-		if (secondMostExtreme > curD)
+		// No neighbor was farther: continue from a vertex that is (still) on the plateau, if any.
+		while(v == -1 && !plateau.empty())
 		{
-			mostExtremeDistance = secondMostExtreme;
-			return secondTry;
+			if (dot(direction, hull.v[plateau.back()]) >= curD - plateauEpsilon)
+				v = plateau.back();
+			plateau.pop_back();
 		}
 	}
+	if (ties)
+		for(size_t i = 0; i < visited.size(); ++i)
+			if (dot(direction, hull.v[visited[i]]) >= curD - plateauEpsilon)
+				ties->push_back(visited[i]);
 	mostExtremeDistance = curD;
 	return startingVertex;
 }
 
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
-static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
+// `faceNormals` are the unit normals of the faces of the hull.
+static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &faceNormals)
 {
 	double t0 = TRACE_START();
 	long evcCalls0 = 0, evcSteps0 = 0;
@@ -1822,13 +1110,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	const int V = (int)vtx.size();
 	const int F = (int)hull.f.size();
 
-	// Precomputation: Compute normalized face direction vectors for each face of the hull.
-	std::vector<vec3> faceNormals(F);
 	for(int i = 0; i < F; ++i) // O(F)
-	{
 		if (hull.f[i].size() < 3) return minOBB; // Degenerate face, cannot process.
-		faceNormals[i] = PolyhedronFaceNormal(hull, i);
-	}
 
 	// For each edge i, specifies the two vertices v0 and v1 through which that edge goes.
 	// This array does not have duplicates, i.e. there only exists one edge index for (v0->v1), and no
@@ -1838,41 +1121,63 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// For each edge i, specifies the two face indices f0 and f1 that share that edge.
 	std::vector<std::pair<int, int>> facesForEdge;
 	facesForEdge.reserve(V * 2);
-	// For each vertex pair (v0, v1) through which there is an edge, specifies the index i of the edge that passes through them.
-	// This map contains duplicates, so both (v0, v1) and (v1, v0) map to the same edge index.
-	// Currently use a O(V^2) array for this data structure for performance.
-	unsigned int *vertexPairsToEdges = new unsigned int[hull.v.size()*hull.v.size()];
-	memset(vertexPairsToEdges, 0xFF, sizeof(unsigned int)*hull.v.size()*hull.v.size());
-#define EMPTY_EDGE 0xFFFFFFFFU
+	// The edge indices of the vertex pairs (v0, v1) through which there is an edge, in two forms:
+	// For each neighbor of each vertex, in the order of adjacencyData, the index of the edge between the two.
+	std::vector<std::vector<int> > adjacentEdges(V);
+	// For each vertex of each face, the index of the edge that leads to it from the previous vertex of the face.
+	std::vector<std::vector<int> > faceEdges(F);
 
 	// Precomputation: for each edge through vertices (i,j), we need to know
 	// the face indices for the two adjoining faces that share the edge.
 	// This is O(V).
-	for (int fi = 0; fi < F; ++fi)
 	{
-		const std::vector<int> &face = hull.f[fi];
-		int v0 = face.back();
-		for (size_t j = 0; j < face.size(); ++j)
+		// Maps a vertex pair, the smaller index first, to the index of the edge that passes through them.
+		std::unordered_map<unsigned long long, int> vertexPairsToEdges;
+		vertexPairsToEdges.reserve((size_t)V * 4);
+		for (int fi = 0; fi < F; ++fi)
 		{
-			int v1 = face[j];
-			if (vertexPairsToEdges[v0 * V + v1] == EMPTY_EDGE)
+			const std::vector<int> &face = hull.f[fi];
+			int v0 = face.back();
+			for (size_t j = 0; j < face.size(); ++j)
 			{
-				vertexPairsToEdges[v0 * V + v1] = (int)edges.size();
-				vertexPairsToEdges[v1 * V + v0] = (int)edges.size();
-				edges.push_back({ v0, v1 });
-				facesForEdge.push_back({ fi, -1 }); // The -1 will be filled once we see the edge v1->v0.
+				int v1 = face[j];
+				unsigned long long vertexPair = ((unsigned long long)std::min(v0, v1) << 32) | (unsigned int)std::max(v0, v1);
+				std::pair<std::unordered_map<unsigned long long, int>::iterator, bool> edge =
+					vertexPairsToEdges.insert(std::make_pair(vertexPair, (int)edges.size()));
+				if (edge.second)
+				{
+					edges.push_back({ v0, v1 });
+					facesForEdge.push_back({ fi, -1 }); // The -1 will be filled once we see the edge v1->v0.
+				}
+				else
+					facesForEdge[edge.first->second].second = fi;
+				faceEdges[fi].push_back(edge.first->second);
+				v0 = v1;
 			}
-			else
-				facesForEdge[vertexPairsToEdges[v0 * V + v1]].second = fi;
-			v0 = v1;
 		}
+		for (int v0 = 0; v0 < V; ++v0)
+			for (size_t j = 0; j < adjacencyData[v0].size(); ++j)
+			{
+				int v1 = adjacencyData[v0][j];
+				adjacentEdges[v0].push_back(vertexPairsToEdges[((unsigned long long)std::min(v0, v1) << 32) | (unsigned int)std::max(v0, v1)]);
+			}
 	}
 
 	TRACE_FMT(t0, "obb: precompute adjacency+edges (V=%d F=%d E=%d)", V, F, (int)edges.size());
 
-	// Throughout the algorithm, internal edges can all be discarded, so provide a helper macro to test for that.
-#define IS_INTERNAL_EDGE(i) (dot(faceNormals[facesForEdge[i].first], faceNormals[facesForEdge[i].second]) > 1.f - 1e-4f)
+	// Throughout the algorithm, internal edges (edges between coplanar faces) can all be discarded. The faces of
+	// the hull are its actual facets, so no two adjacent faces are exactly coplanar; but if their normals are
+	// equal to the precision of single precision floats, the edge has no normal arc to speak of. Note that
+	// the tolerance cannot be any larger than that: when the hull is flat, tilting a box face by an angle
+	// changes the volume of the box by that angle times the aspect ratio of the box.
 	const int E = (int)edges.size();
+	std::vector<unsigned char> isInternalEdge(E);
+	for (int i = 0; i < E; ++i)
+	{
+		dvec3 diff = dvec3(faceNormals[facesForEdge[i].first]) - dvec3(faceNormals[facesForEdge[i].second]);
+		isInternalEdge[i] = dot(diff, diff) < 1e-12;
+	}
+#define IS_INTERNAL_EDGE(i) (isInternalEdge[i] != 0)
 
 	// Throughout the whole algorithm, this array stores an auxiliary structure for performing graph searches
 	// on the vertices of the convex hull. Conceptually each index of the array stores a boolean whether we
@@ -1901,15 +1206,15 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	srand(123); // TODO: mini RNG
 //	LCG rng(123);
 	{ // Explicit scope for variables that are not needed after this.
-		std::vector<std::pair<int, int> > traverseStackEdges;
+		std::vector<std::pair<int, int> > traverseStackEdges; // An edge, and the vertex of it to continue from.
 		std::vector<unsigned int> visitedEdges(edges.size());
 		std::vector<unsigned int> visitedFaces(hull.f.size());
-		traverseStackEdges.push_back(std::make_pair(0, adjacencyData[0].front()));
+		traverseStackEdges.push_back(std::make_pair(adjacentEdges[0].front(), adjacencyData[0].front()));
 		while(!traverseStackEdges.empty())
 		{
 			std::pair<int, int> e = traverseStackEdges.back();
 			traverseStackEdges.pop_back();
-			int thisEdge = vertexPairsToEdges[e.first*hull.v.size()+e.second];
+			int thisEdge = e.first;
 			if (visitedEdges[thisEdge])
 				continue;
 			visitedEdges[thisEdge] = 1;
@@ -1929,11 +1234,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			size_t sizeBefore = traverseStackEdges.size();
 			for(size_t i = 0; i < adjacencyData[v0].size(); ++i)
 			{
-				int v1 = adjacencyData[v0][i];
-				int e1 = vertexPairsToEdges[v0*hull.v.size()+v1];
+				int e1 = adjacentEdges[v0][i];
 				if (visitedEdges[e1])
 					continue;
-				traverseStackEdges.push_back(std::make_pair(v0, v1));
+				traverseStackEdges.push_back(std::make_pair(e1, adjacencyData[v0][i]));
 			}
 			// Take a random adjacent edge.
 			int nNewEdges = (int)(traverseStackEdges.size() - sizeBefore);
@@ -1982,25 +1286,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 			const std::vector<int> &neighbors = adjacencyData[v];
 			if (IsVertexAntipodalToEdge(hull.v, v, neighbors, f1a, f1b))
 			{
+				// A vertex of the edge itself can pass the test only due to its tolerances (the hull
+				// is nearly flat there): it is not antipodal to its own edge.
 				if (edges[i].first == v || edges[i].second == v)
-				{
-					/* 
-					LOGE("Edge %d: %d->%d is antipodal to vertex %d, which is part of the same edge! This should be possible only if the input is degenerate planar!",
-						(int)i, edges[i].first, edges[i].second, v);
-					*/
-					delete[] vertexPairsToEdges;
-					// Input set is degenerate planar. Return an invalid OBB.
-					OBB degenerateObb;
-					degenerateObb.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX); // Degenerate marker.
-					return degenerateObb;
-
-					// We could automatically compute a planar box here, but in order to be able to do that robustly,
-					// one should definitely compute the planar box on the source input set, and not on a convex hull
-					// computed from that input set. So it is possible that this computed box from convexHull will
-					// be bad due to float imprecision. Instead, caller should call SmallestOBBVolume2DPlanar() on
-					// the source point set if they want to get a flat OBB from the input point set.
-					/////return SmallestOBBVolume2DPlanar((const vec3*)&hull.v[0], (int)hull.v.size());
-				}
+					continue;
 				antipodalPointsForEdge[i].push_back(v);
 				for(size_t j = 0; j < neighbors.size(); ++j)
 					if (!HAVE_VISITED_VERTEX(neighbors[j]))
@@ -2019,7 +1308,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 //			LOGW("Due to numerical stability issues(?), could not find an antipodal vertex for edge %d! Check the scale of your input dataset! Good scale is having coordinates range e.g. [0.0,100.0]", edges[i]);
 			// Getting here is most likely a bug. Fall back to linear scan, which is very slow.
 			for(size_t j = 0; j < hull.v.size(); ++j) // O(V)
-				if (IsVertexAntipodalToEdge(hull.v, (int)j, adjacencyData[j], f1a, f1b))
+				if (edges[i].first != (int)j && edges[i].second != (int)j && IsVertexAntipodalToEdge(hull.v, (int)j, adjacencyData[j], f1a, f1b))
 					antipodalPointsForEdge[i].push_back((int)j);
 
 //			antipodalPointsForEdge[i].push_back(startingVertex);
@@ -2033,8 +1322,18 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with.
 	std::vector<std::vector<int>> compatibleEdges(E);
 
-	// Use an O(E*V) data structure for sidepodal vertices.
-	std::vector<unsigned char> sidepodalVertices((size_t)E * V, 0);
+	// Use an O(E*V) data structure for sidepodal vertices: one bit for each vertex of each edge.
+	std::vector<unsigned int> sidepodalVertices(((size_t)E * V + 31) / 32, 0);
+	auto IsSidepodalVertex = [&](size_t edge, int vertex) -> bool
+	{
+		size_t bit = edge * V + vertex;
+		return ((sidepodalVertices[bit >> 5] >> (bit & 31)) & 1) != 0;
+	};
+	auto SetSidepodalVertex = [&](size_t edge, int vertex)
+	{
+		size_t bit = edge * V + vertex;
+		sidepodalVertices[bit >> 5] |= 1u << (bit & 31);
+	};
 
 	// Compute all sidepodal edges for each edge by performing a graph search. The set of sidepodal edges is
 	// connected in the graph, which lets us avoid having to iterate over each edge pair of the convex hull.
@@ -2050,12 +1349,14 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		vec3 basis1, basis2;
 		PerpendicularBasis(deadDirection, basis1, basis2);
 
+		// Start the search from the extreme vertex in a direction that is perpendicular to f1a: some of its
+		// edges are sidepodal to this edge. If several vertices tie as the extreme one (the direction is the
+		// normal of a face), any of them may be the one with those edges, so start from them all.
 		float dummy;
 		vec3 dir = Perpendicular(f1a);
 		CLEAR_GRAPH_SEARCH();
-		startingVertex = ExtremeVertexConvex(hull, adjacencyData, dir, floodFillVisited, floodFillVisitColor, dummy, startingVertex); // O(log|V|)
+		startingVertex = ExtremeVertexConvex(hull, adjacencyData, dir, floodFillVisited, floodFillVisitColor, dummy, startingVertex, &traverseStack); // O(log|V|)
 		CLEAR_GRAPH_SEARCH();
-		traverseStack.push_back(startingVertex);
 		while(!traverseStack.empty()) // O(sqrt(E))
 		{
 			int v = traverseStack.back();
@@ -2071,8 +1372,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				if (HAVE_VISITED_VERTEX(vAdj))
 					continue;
 
-//				int edge = vertexPairsToEdges[std::make_pair(v, vAdj)];
-				int edge = vertexPairsToEdges[v*hull.v.size()+vAdj];
+				int edge = adjacentEdges[v][j];
 //				if (IS_INTERNAL_EDGE(edge))
 //					continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
 				if (AreEdgesCompatibleForOBB(f1a, f1b, faceNormals[facesForEdge[edge].first], faceNormals[facesForEdge[edge].second]))
@@ -2082,8 +1382,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 						if (!IS_INTERNAL_EDGE(edge))
 							compatibleEdges[i].push_back(edge);
 
-						sidepodalVertices[i*hull.v.size()+edges[edge].first] = 1;
-						sidepodalVertices[i*hull.v.size()+edges[edge].second] = 1;
+						SetSidepodalVertex(i, edges[edge].first);
+						SetSidepodalVertex(i, edges[edge].second);
 
 //						sidepodalVertices[i].insert(edges[edge].first);
 //						sidepodalVertices[i].insert(edges[edge].second);
@@ -2096,8 +1396,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 								compatibleEdges[edge].push_back((int)i);
 //							sidepodalVertices[edge].insert(edges[i].first);
 //							sidepodalVertices[edge].insert(edges[i].second);
-							sidepodalVertices[edge*hull.v.size()+edges[i].first] = 1;
-							sidepodalVertices[edge*hull.v.size()+edges[i].second] = 1;
+							SetSidepodalVertex(edge, edges[i].first);
+							SetSidepodalVertex(edge, edges[i].second);
 //							sidepodalVerticesForEdge[edge].push_back(edges[i].first);
 //							sidepodalVerticesForEdge[edge].push_back(edges[i].second);
 //							++numSmallerCompatibleEdgeIndices[edge];
@@ -2174,9 +1474,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 
 			int secondSearch = -1;
 #ifdef SECOND_GUESS_SIDEPODALS
-			if (sidepodalVertices[edgeJ*hull.v.size()+extremeVertexSearchHint1]) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
+			if (IsSidepodalVertex(edgeJ, extremeVertexSearchHint1)) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
 			else traverseStack.push_back(extremeVertexSearchHint1);
-			if (sidepodalVertices[edgeJ*hull.v.size()+extremeVertexSearchHint2]) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
+			if (IsSidepodalVertex(edgeJ, extremeVertexSearchHint2)) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
 			else secondSearch = extremeVertexSearchHint2;//traverseStack.push_back(extremeVertexSearchHint2);
 #else
 			traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
@@ -2196,9 +1496,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				for(size_t k = 0; k < n.size(); ++k)
 				{
 					int vAdj = n[k];
-					if (!HAVE_VISITED_VERTEX(vAdj) && sidepodalVertices[i*hull.v.size()+vAdj])
+					if (!HAVE_VISITED_VERTEX(vAdj) && IsSidepodalVertex(i, vAdj))
 					{
-						if (sidepodalVertices[edgeJ*hull.v.size()+vAdj])
+						if (IsSidepodalVertex(edgeJ, vAdj))
 						{
 							traverseStack.clear();
 							if (secondSearch != -1)
@@ -2228,12 +1528,11 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				for(size_t k = 0; k < n.size(); ++k)
 				{
 					int vAdj = n[k];
-//					int edgeK = vertexPairsToEdges[std::make_pair(v, vAdj)];
-					int edgeK = vertexPairsToEdges[v*hull.v.size()+vAdj];
+					int edgeK = adjacentEdges[v][k];
 					if (IS_INTERNAL_EDGE(edgeK))
 						continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
-					if (sidepodalVertices[i*hull.v.size()+vAdj]
-						&& sidepodalVertices[edgeJ*hull.v.size()+vAdj])
+					if (IsSidepodalVertex(i, vAdj)
+						&& IsSidepodalVertex(edgeJ, vAdj))
 					{
 						if (!HAVE_VISITED_VERTEX(vAdj))
 							traverseStackCommonSidepodals.push_back(vAdj);
@@ -2292,8 +1591,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				if (vAdj < antipodalVertex)
 					continue; // We search unordered edges, so no need to process edge (v1, v2) and (v2, v1) twice - take the canonical order to be antipodalVertex < vAdj
 
-//				int edge = vertexPairsToEdges[std::make_pair(antipodalVertex, vAdj)];
-				int edge = vertexPairsToEdges[antipodalVertex*hull.v.size()+vAdj];
+				int edge = adjacentEdges[antipodalVertex][k];
 				if ((int)i > edge) // We search pairs of edges, so no need to process twice - take the canonical order to be i < edge.
 					continue;
 				if (IS_INTERNAL_EDGE(edge))
@@ -2391,17 +1689,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 					}
 
 					float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-					if (volume < minVolume)
-					{
-						minOBB.pos = (n*(minN1 + maxN1) + n2*(minN2 + maxN2) + n3*(minN3 + maxN3)) * 0.5f;
-						minOBB.axis[0] = n;
-						minOBB.axis[1] = n2;
-						minOBB.axis[2] = n3;
-						minOBB.r[0] = (maxN1 - minN1) * 0.5f;
-						minOBB.r[1] = (maxN2 - minN2) * 0.5f;
-						minOBB.r[2] = (maxN3 - minN3) * 0.5f;
-						minVolume = volume;
-					}
+					TestBox(hull.v, n, n2, volume, &minVolume, &minOBB);
 				}
 			}
 		}
@@ -2422,17 +1710,14 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 		// choose two that are possibly most opposing to each other, in the hope that their sets of sidepodal
 		// edges are most mutually exclusive as possible, speeding up the search below.
 		int e1 = -1;
-		int v0 = hull.f[i].back();
-		for(size_t j = 0; j < hull.f[i].size(); ++j)
+		for(size_t j = 0; j < faceEdges[i].size(); ++j)
 		{
-			int v1 = hull.f[i][j];
-			int e = vertexPairsToEdges[v0*hull.v.size()+v1];
+			int e = faceEdges[i][j];
 			if (!IS_INTERNAL_EDGE(e))
 			{
 				e1 = e;
 				break;
 			}
-			v0 = v1;
 		}
 		if (e1 == -1)
 			continue; // All edges of this face were degenerate internal edges! Just skip processing the whole face.
@@ -2516,18 +1801,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 				}
 
 				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-				if (volume < minVolume)
-				{
-					minOBB.pos = (n1*(minN1 + maxN1) + n2*(minN2 + maxN2) + n3*(minN3 + maxN3)) * 0.5f;
-					minOBB.axis[0] = n1;
-					minOBB.axis[1] = n2;
-					minOBB.axis[2] = n3;
-					minOBB.r[0] = (maxN1 - minN1) * 0.5f;
-					minOBB.r[1] = (maxN2 - minN2) * 0.5f;
-					minOBB.r[2] = (maxN3 - minN3) * 0.5f;
-					assert(volume > 0.f);
-					minVolume = volume;
-				}
+				TestBox(hull.v, n1, n2, volume, &minVolume, &minOBB);
 			}
 		}
 	}
@@ -2539,31 +1813,78 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull)
 	// fix that up at the very last step, if necessary.
 	if (dot(cross(minOBB.axis[0], minOBB.axis[1]), minOBB.axis[2]) < 0.f)
 		minOBB.axis[2] = -minOBB.axis[2];
-	delete[] vertexPairsToEdges;
 	return minOBB;
 }
 
+// Computes the tightest box around the points that has the axes dir0, dir1 made orthogonal to dir0, and their
+// cross product. This is done in double precision, relative to the first point. The returned box encloses
+// the points: its half extents are measured from its center as it is returned, i.e. rounded to floats. (Far
+// away from the origin the center cannot be represented accurately, which then costs some tightness.)
 static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3 &dir0, const vec3 &dir1)
 {
-	int d0, d1;
-	vec3 mindir, maxdir;
-	ExtremePointsAlongDirection(pointArray, dir0, d0, d1, mindir.x, maxdir.x);
-	ExtremePointsAlongDirection(pointArray, dir1, d0, d1, mindir.y, maxdir.y);
-	vec3 edgeC = Normalized(cross(dir0, dir1));
-	ExtremePointsAlongDirection(pointArray, edgeC, d0, d1, mindir.z, maxdir.z);
-	vec3 center = (mindir + maxdir) * 0.5f;
-	OBB minOBB;
-	minOBB.pos = dir0*center.x + dir1*center.y + edgeC*center.z;
-	minOBB.axis[0] = dir0;
-	minOBB.axis[1] = dir1;
-	minOBB.axis[2] = edgeC;
-	minOBB.r = center - mindir;
-	return minOBB;
+	dvec3 axis[3];
+	axis[0] = Normalized(dvec3(dir0));
+	axis[1] = Normalized(dvec3(dir1) - axis[0] * dot(axis[0], dvec3(dir1)));
+	axis[2] = cross(axis[0], axis[1]);
+
+	OBB obb;
+	const dvec3 origin = pointArray[0];
+	dvec3 center = origin;
+	for (int i = 0; i < 3; ++i)
+	{
+		obb.axis[i] = axis[i].ToFloat();
+		axis[i] = obb.axis[i];
+		double minD = DBL_MAX, maxD = -DBL_MAX;
+		for (size_t j = 0; j < pointArray.size(); ++j)
+		{
+			double d = dot(axis[i], dvec3(pointArray[j]) - origin);
+			minD = std::min(minD, d);
+			maxD = std::max(maxD, d);
+		}
+		center = center + axis[i] * ((minD + maxD) * 0.5);
+	}
+	obb.pos = center.ToFloat();
+	for (int i = 0; i < 3; ++i)
+	{
+		double r = 0.0;
+		for (size_t j = 0; j < pointArray.size(); ++j)
+			r = std::max(r, fabs(dot(axis[i], dvec3(pointArray[j]) - dvec3(obb.pos))));
+		obb.r[i] = (float)r;
+		if (obb.r[i] < r)
+			obb.r[i] = nextafterf(obb.r[i], FLT_MAX);
+	}
+	return obb;
 }
 
 // ----------------------------------------------------------------------------
 // Public entry point
 // ----------------------------------------------------------------------------
+
+// True if the box is thinner than what the precision of single precision floats can resolve at its size.
+static bool IsFlat(const OBB &obb)
+{
+	return std::min(obb.r.x, std::min(obb.r.y, obb.r.z)) < 2e-6f * hmax(obb.r);
+}
+
+static float LargestFaceArea(const OBB &obb)
+{
+	return 4.f * std::max(obb.r.x * obb.r.y, std::max(obb.r.y * obb.r.z, obb.r.x * obb.r.z));
+}
+
+// Returns the box that has the given axis, and the smallest area perpendicular to it among such boxes:
+// the minimum area rectangle of the points projected along the axis (rotating calipers).
+static OBB SmallestOBBAlongAxis(const std::vector<vec3> &pointArray, const vec3 &axis)
+{
+	vec3 u, v;
+	PerpendicularBasis(axis, u, v);
+	std::vector<float2> pts(pointArray.size());
+	for (size_t i = 0; i < pointArray.size(); ++i)
+		pts[i] = float2(dot(u, pointArray[i]), dot(v, pointArray[i]));
+	float2 rectCenter, uDir, vDir;
+	float minU = 0.f, maxU = 0.f, minV = 0.f, maxV = 0.f;
+	MinAreaRect2D(&pts[0], (int)pts.size(), rectCenter, uDir, vDir, minU, maxU, minV, maxV);
+	return FixedOrientationEnclosingOBB(pointArray, axis, u * uDir.x + v * uDir.y);
+}
 
 OBB minobb(const Hull3 &hull)
 {
@@ -2608,44 +1929,84 @@ OBB minobb(const Hull3 &hull)
 		return o;
 	}
 
-	if (hull.IsDegenerate())
-		// The points are planar (or nearly so): compute a flat OBB with the 2D
-		// algorithm. Running it on the hull vertices is exact: a linear projection
-		// commutes with the convex hull, so the 2D hull of the projected input
-		// equals the 2D hull of the projected hull vertices.
-		return SmallestOBBVolume2DPlanar(points);
+	// The search keeps a table of one bit for each vertex of each edge of the hull. Give up on a hull for
+	// which that table alone would take more than 4 GB: such a hull has tens of thousands of vertices, and
+	// the search would take hours on it in any case.
+	size_t numEdges = 0;
+	for (size_t i = 0; i < hull.f.size(); ++i)
+		numEdges += hull.f[i].size() / 2;
+	if ((double)numEdges * n > 8.0 * 4e9)
+		return degenerate;
 
-	OBB optimalObb;
+	// The search works in single precision and with absolute tolerances. To make it independent of where
+	// the input is and how large it is, it is run on a copy of the hull that is centered at the origin
+	// and scaled to a fixed size: its largest half extent is in [8, 16). The scale is a power of two, so
+	// scaling does not round.
+	dvec3 minP = points[0], maxP = points[0];
+	for (int i = 1; i < n; ++i)
 	{
-		double t0 = TRACE_START();
-		optimalObb = OptimalEnclosingOBB3D(hull);
-		TRACE_MARK(t0, "minobb: OptimalEnclosingOBB3D");
+		minP = dvec3(std::min(minP.x, (double)points[i].x), std::min(minP.y, (double)points[i].y), std::min(minP.z, (double)points[i].z));
+		maxP = dvec3(std::max(maxP.x, (double)points[i].x), std::max(maxP.y, (double)points[i].y), std::max(maxP.z, (double)points[i].z));
 	}
-	if (optimalObb.IsDegenerate())
-	{
-		// The category search found no configuration at all. For nearly-planar hulls the
-		// numerically coplanar faces can break the flush-edge structure it relies on, and
-		// the 2D planar path below assumes truly flat input. Try a coarse sphere sweep
-		// (exact given each candidate axis) first, and keep the better of the two. The
-		// volume > 0 check rejects the sweep's "no result" sentinel, which can otherwise
-		// (volume 0) beat any real box in the comparison below.
-		OBB sweep = CoarseSweepEnclosingOBB(hull.v);
-		OBB planar = SmallestOBBVolume2DPlanar(points);
-		if (!sweep.IsDegenerate() && sweep.Volume() > 0.f && sweep.Volume() < planar.Volume())
-			return sweep;
-		return planar;
-	}
+	const dvec3 center = (minP + maxP) * 0.5;
+	int exponent;
+	frexp(std::max(maxP.x - minP.x, std::max(maxP.y - minP.y, maxP.z - minP.z)) * 0.5, &exponent);
+	const double scale = ldexp(1.0, 4 - exponent);
+	Hull3 local;
+	local.f = hull.f;
+	local.degenerate = hull.degenerate;
+	local.v.reserve(n);
+	for (int i = 0; i < n; ++i)
+		local.v.push_back(((dvec3(points[i]) - center) * scale).ToFloat());
+
+	OBB obb;
+	if (hull.IsDegenerate())
+		// The points are planar: compute a flat OBB with the 2D algorithm. Running it on
+		// the hull vertices is exact: a linear projection commutes with the convex hull,
+		// so the 2D hull of the projected input equals the 2D hull of the projected hull
+		// vertices.
+		obb = SmallestOBBVolume2DPlanar(local.v);
 	else
 	{
-		// Retighten the best box: recompute the extents of the found orientation with
-		// exact min/max scans over the points. The search above works in float and the
-		// three found axes can be off from perfectly orthogonal by up to 1e-3 (accepted
-		// in ComputeBasis), which makes the center/extent bookkeeping of the winning
-		// configuration inconsistent by a few ulps of the box size. Re-deriving the box
-		// in the same orientation guarantees containment (up to pure float rounding).
+		// The face normals are computed from the original hull, which the copy matches only up to rounding.
+		std::vector<vec3> faceNormals(hull.f.size());
+		for (size_t i = 0; i < hull.f.size(); ++i)
+			faceNormals[i] = PolyhedronFaceNormal(hull, (int)i);
+
 		double t0 = TRACE_START();
-		OBB o = FixedOrientationEnclosingOBB(points, optimalObb.axis[0], optimalObb.axis[1]);
-		TRACE_MARK(t0, "minobb: retighten (3x O(n) scans)");
-		return o;
+		obb = OptimalEnclosingOBB3D(local, faceNormals);
+		TRACE_MARK(t0, "minobb: OptimalEnclosingOBB3D");
+		if (obb.IsDegenerate())
+		{
+			// The category search found no configuration at all. For nearly-planar hulls the
+			// numerically coplanar faces can break the flush-edge structure it relies on, and
+			// the 2D planar path below assumes truly flat input. Try a coarse sphere sweep
+			// (exact given each candidate axis) first, and keep the better of the two. The
+			// volume > 0 check rejects the sweep's "no result" sentinel, which can otherwise
+			// (volume 0) beat any real box in the comparison below.
+			OBB sweep = CoarseSweepEnclosingOBB(local.v);
+			obb = SmallestOBBVolume2DPlanar(local.v);
+			if (!sweep.IsDegenerate() && sweep.Volume() > 0.f && sweep.Volume() < obb.Volume())
+				obb = sweep;
+		}
+		else if (IsFlat(obb))
+		{
+			// The hull is flat to the precision of single precision floats: typically a planar model whose
+			// vertices are off its plane by rounding errors. The thickness of its box is then noise (the
+			// axes of the box cannot even be represented accurately enough to resolve it), so there is no
+			// point in minimizing the volume of the box as opposed to its area: take the box with the
+			// smallest area among the boxes of the same thin axis.
+			const int thin = obb.r.x <= obb.r.y && obb.r.x <= obb.r.z ? 0 : (obb.r.y <= obb.r.z ? 1 : 2);
+			OBB planar = SmallestOBBAlongAxis(local.v, obb.axis[thin]);
+			if (IsFlat(planar) && LargestFaceArea(planar) < LargestFaceArea(obb))
+				obb = planar;
+		}
 	}
+
+	// The search only determines the orientation of the box. The box itself is the tightest box of
+	// that orientation around the vertices of the input hull.
+	double t0 = TRACE_START();
+	obb = FixedOrientationEnclosingOBB(points, obb.axis[0], obb.axis[1]);
+	TRACE_MARK(t0, "minobb: fit the box (3x O(n) scans)");
+	return obb;
 }

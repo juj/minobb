@@ -9,3 +9,4 @@ __pycache__
 *.exe
 build
 hf-objaverse-v1
+convex_hull_report

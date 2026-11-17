@@ -10,6 +10,8 @@ set(OBB_TEST_GLB "" CACHE STRING "GLB file passed as argv[1] when launching from
 
 add_executable(minobb_glb
     minobb.cpp
+    convex_hull.cpp
+    glb.cpp
     test/minobb_glb.cpp
 )
 

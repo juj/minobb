@@ -6,8 +6,8 @@ Test sources live under test/ (see that directory). All temporary build
 artifacts (object files, executables) are compiled under tmp/ and are
 recreated from scratch on every run.
 
-No external dependencies: only minobb.h/minobb.cpp from this repository,
-a C++ compiler.
+No external dependencies: only minobb, convex_hull and glb.{h,cpp} from
+this repository, a C++ compiler.
 
 Usage:  python test.py
 """
@@ -22,6 +22,7 @@ import time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TEST_DIR = os.path.join(ROOT, "test")
 TMP_DIR = os.path.join(ROOT, "tmp")
+CONVEX_HULL = os.path.join(ROOT, "convex_hull.cpp")  # linked into every test: minobb() takes its hulls
 
 CXX = shutil.which("clang++") or "clang++"
 CXXFLAGS = ["-O3"]
@@ -63,7 +64,7 @@ def build_exe(name, cpp_sources, extra_includes=()):
 def t_testobb():
     """Self-check of minobb() against the paper's worked examples A)-D)."""
     exe = build_exe("testobb", [os.path.join(TEST_DIR, "testobb.cpp"),
-                                os.path.join(ROOT, "minobb.cpp")], ["-I", ROOT])
+                                os.path.join(ROOT, "minobb.cpp"), CONVEX_HULL], ["-I", ROOT])
     if not exe:
         record("testobb", False, "build failed", 0.0)
         return
@@ -76,7 +77,7 @@ def t_testobb():
 
 def t_repro_minimal():
     """Nearly-planar 5-point set: containment + volume vs double-precision optimum."""
-    exe = build_exe("repro_minimal", [os.path.join(TEST_DIR, "repro_minimal.cpp")], ["-I", ROOT])
+    exe = build_exe("repro_minimal", [os.path.join(TEST_DIR, "repro_minimal.cpp"), CONVEX_HULL], ["-I", ROOT])
     if not exe:
         record("repro_minimal", False, "build failed", 0.0)
         return
@@ -90,7 +91,7 @@ def t_repro_minimal():
 
 def t_contcheck():
     """All saved case files: OBB must enclose every point."""
-    exe = build_exe("contcheck", [os.path.join(TEST_DIR, "contcheck.cpp")], ["-I", ROOT])
+    exe = build_exe("contcheck", [os.path.join(TEST_DIR, "contcheck.cpp"), CONVEX_HULL], ["-I", ROOT])
     if not exe:
         record("contcheck", False, "build failed", 0.0)
         return
@@ -122,6 +123,15 @@ def t_glb():
         log(out)
 
 
+def t_script(name, script, summary):
+    """Runs one of the stand-alone test scripts of the repository root, see their docstrings."""
+    rc, out, dur = run([sys.executable, os.path.join(ROOT, script)], timeout=7200)
+    m = re.search(summary, out)
+    record(name, rc == 0, m.group(0) if m else "see output", dur)
+    if rc != 0:
+        log(out)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -139,6 +149,8 @@ def main():
     t_repro_minimal()
     t_contcheck()
     t_glb()
+    t_script("convex_hull", "test_convex_hull.py", r"\d+/\d+ hulls passed.*")
+    t_script("minobb", "test_minobb.py", r"\d+/\d+ boxes passed.*")
 
     nfail = sum(1 for _, ok, _, _ in results if not ok)
     log(f"\n{len(results) - nfail}/{len(results)} tests passed")

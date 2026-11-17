@@ -41,7 +41,7 @@ def build_exe():
     exe = os.path.join(TMP_DIR, "minobb_glb.exe")
     cmd = [CXX, "-O2", "-std=c++17", "-I.",
            "-o", os.path.relpath(exe, ROOT),
-           "minobb.cpp", os.path.join("test", "minobb_glb.cpp")]
+           "minobb.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp")]
     p = subprocess.run(cmd, cwd=ROOT)
     if p.returncode != 0 or not os.path.exists(exe):
         return None
