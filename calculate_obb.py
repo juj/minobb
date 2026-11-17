@@ -13,6 +13,10 @@ Usage (from the repo root):
   python calculate_obb.py [--timeout SECONDS] [--jobs N]
 
 Files that exceed --timeout are killed and reported; the rest still complete.
+
+The timings in the .json files (which build_index.py plots into glb.html) are
+taken while the other workers run. For timings that are not slowed down by
+them, use fewer workers than the machine has fast cores, e.g. --jobs 8.
 """
 
 import argparse

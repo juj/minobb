@@ -44,6 +44,29 @@ static double NowSeconds()
 	return (double)cnt.QuadPart / (double)freq.QuadPart;
 }
 
+// Returns the time that one call of f() takes, in seconds. A call that takes
+// less than a few milliseconds is repeated for that long, and the fastest run
+// counts; calls that are too fast for the timer are timed in batches.
+template<typename F>
+static double TimeCall(F f)
+{
+	double best = INFINITY, total = 0;
+	int batch = 1;
+	for (int run = 0; run < 64 && total < 0.005; ++run)
+	{
+		const double t0 = NowSeconds();
+		for (int i = 0; i < batch; ++i)
+			f();
+		const double t = NowSeconds() - t0;
+		total += t;
+		if (t < 1e-4 && batch < (1 << 20))
+			batch *= 4;
+		else
+			best = std::min(best, t / batch);
+	}
+	return best;
+}
+
 // Reduces a world-space point list to at most `max_points` using a uniform
 // grid (the first point of each occupied cell is kept). Deterministic.
 // max_points == 0 disables subsampling.
@@ -134,13 +157,10 @@ int main(int argc, char **argv)
 
 	// Compute the convex hull, then the minimum-volume OBB from it (two-pass
 	// API; timed with QueryPerformanceCounter, the times go into the JSON).
-	double t0 = NowSeconds();
-	Hull3 hull = convex_hull(pts.data(), num_pts, 12);
-	double t1 = NowSeconds();
-	OBB obb = minobb(hull);
-	double t2 = NowSeconds();
-	const double hull_sec = t1 - t0;
-	const double obb_sec = t2 - t1;
+	Hull3 hull;
+	OBB obb;
+	const double hull_sec = TimeCall([&] { hull = convex_hull(pts.data(), num_pts, 12); });
+	const double obb_sec = TimeCall([&] { obb = minobb(hull); });
 	fprintf(stderr, "info: hull: %zu verts, %zu faces (%.3fs)\n",
 		hull.v.size(), hull.f.size(), hull_sec);
 	if (obb.IsDegenerate())
@@ -154,8 +174,8 @@ int main(int argc, char **argv)
 	if (num_pts < total_pts)
 		printf("  \"subsampled_from\": %d,\n", total_pts);
 	printf("  \"timing\": {\n");
-	printf("    \"hull_sec\": %.6f,\n", hull_sec);
-	printf("    \"obb_sec\": %.6f\n", obb_sec);
+	printf("    \"hull_sec\": %.9f,\n", hull_sec);
+	printf("    \"obb_sec\": %.9f\n", obb_sec);
 	printf("  },\n");
 
 	printf("  \"hull\": {\n");
