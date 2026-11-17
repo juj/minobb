@@ -21,13 +21,12 @@ PASS if the box of minobb()
     boxes. If the ground truth box is flat within that error, its volume says
     nothing, and the areas of the largest faces are compared instead.)
 
-SKIP if the hull is too large for minobb(), which then returns no box (see
-minobb.h). Such a case counts as neither passed nor failed.
-
 The ground truth of a hull of tens of thousands of vertices takes minutes to
 compute, so for the GLB files it is cached next to the file as <name>.gt.json.
 The cache is used until the file or the sources that the ground truth depends
-on change.
+on change. (For a hull of hundreds of thousands of vertices it takes an hour
+of CPU time: the search for such a hull runs on as many threads as there are
+workers.)
 
 Usage:        python test_minobb.py [glb_dir] [--filter TEXT] [--jobs N] [--refresh]
 Exit status:  0 = all passed, 1 = at least one failure
@@ -58,7 +57,7 @@ GROUND_TRUTH_SOURCES = ["convex_hull.cpp", "glb.cpp", os.path.join("test", "test
 TOLERANCE = 1e-4  # of the volume
 SLACK = 2e-6      # of the size of the box, on each of its extents
 TIMEOUT = 3600.0  # seconds per run of the tool
-MINOBB_MAX_BITS = 8 * 4e9  # minobb() gives up on a hull whose edges times vertices is more than this (see minobb.h)
+LARGE_HULL = 250000  # hull edges from which the ground truth is searched for on all the workers' threads
 
 
 def build():
@@ -187,14 +186,12 @@ def run_tool(case, *args):
         return {"error": f"crashed (exit code {p.returncode})"}
 
 
-def run_case(case, stamp, refresh):
+def run_case(case, stamp, refresh, jobs):
     """Computes the box of minobb() for one case, and its ground truth unless that is in the cache."""
     result = run_tool(case)
     if "error" in result:
         return dict(case, failure=result["error"], seconds={})
     hull = result["hull"]
-    if not result["valid"] and hull["edges"] * hull["vertices"] > MINOBB_MAX_BITS:
-        return dict(case, failure=None, skipped=True, hull=hull, seconds={})
     if not result["valid"]:
         return dict(case, failure="minobb() did not return a box", seconds={})
     cached = None
@@ -206,7 +203,7 @@ def run_case(case, stamp, refresh):
     if cached:
         result.update(cached["boxes"])
     else:
-        truth = run_tool(case, "--ground-truth")
+        truth = run_tool(case, "--ground-truth", str(jobs if hull["edges"] >= LARGE_HULL else 1))
         if "error" in truth:
             return dict(case, failure="ground truth: " + truth["error"], seconds={})
         boxes = {k: truth[k] for k in ("gt", "sweep", "flat") if k in truth}
@@ -240,12 +237,8 @@ def main():
     t0 = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = []
-        for r in pool.map(lambda c: run_case(c, stamp, args.refresh), cases):
+        for r in pool.map(lambda c: run_case(c, stamp, args.refresh, args.jobs), cases):
             results.append(r)
-            if r.get("skipped"):
-                print(f"  SKIP  {r['name']}  {r['hull']['vertices']} hull vertices and {r['hull']['edges']} edges"
-                      " are too many for minobb(), it returned no box", flush=True)
-                continue
             detail = r["failure"] or (
                 f"{r['hull']['vertices']} hull vertices, volume {r['volume']:.6g}, "
                 + {"": "{:+.1e} % vs. the optimum", "flat": "flat: area {:+.1e} % vs. the optimum",
@@ -255,11 +248,8 @@ def main():
             print(f"  {'FAIL' if r['failure'] else 'PASS'}  {r['name']}  {detail}", flush=True)
 
     failed = [r for r in results if r["failure"]]
-    skipped = [r for r in results if r.get("skipped")]
     done = [r for r in results if r["seconds"]]
-    print(f"\n{len(results) - len(failed) - len(skipped)}/{len(results)} boxes passed"
-          + (f" ({len(failed)} FAILED)" if failed else "")
-          + (f"; {len(skipped)} skipped: the hull is too large for minobb()" if skipped else ""))
+    print(f"\n{len(results) - len(failed)}/{len(results)} boxes passed" + (f" ({len(failed)} FAILED)" if failed else ""))
     if done:
         worst = lambda kind: max((r["excess"] for r in done if r["kind"] == kind and not r["failure"]), default=0.0) * 100
         count = lambda kind: sum(r["kind"] == kind for r in done)
@@ -270,7 +260,7 @@ def main():
         print(f"minobb() took {sum(r['seconds']['minobb'] for r in done):.1f} s in total,"
               f" at most {max(r['seconds']['minobb'] for r in done):.1f} s")
         print(f"ground truth: {sum(r['computed'] for r in done)} computed"
-              f" ({sum(r['seconds']['ground_truth'] + r['seconds']['sweep'] for r in done):.0f} s of CPU time),"
+              f" (in {sum(r['seconds']['ground_truth'] + r['seconds']['sweep'] for r in done):.0f} s),"
               f" {sum(not r['computed'] for r in done)} from the cache; wall time {time.time() - t0:.0f} s")
     return 1 if failed else 0
 

@@ -26,8 +26,9 @@
 //
 // Complexity: O(n log n) typical for the convex hull (convex_hull()) + O(E^3)
 // configuration enumeration for minobb() in the worst case (E = number of
-// convex hull edges). The input can be large, as long as its hull is small to
-// medium sized.
+// convex hull edges). The configurations that cannot make a smaller box than
+// the best one found so far are skipped, which on most hulls is nearly all of
+// them. The input can be large, as long as its hull is small to medium sized.
 //
 // Degenerate input (all points in a plane, on a line, or a single point) is
 // handled by a 2D rotating-calipers / 1D fallback, producing a flat OBB.
@@ -79,6 +80,5 @@ struct OBB
 // the rounding error of its center.)
 //
 // Returns a degenerate OBB (IsDegenerate() == true) if the hull has no
-// vertices, or if it is too large: the search needs E*V bits of working
-// memory (E edges, V vertices), and gives up if that is more than 4 GB.
+// vertices.
 OBB minobb(const Hull3 &hull);

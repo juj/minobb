@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -803,41 +804,147 @@ static int ComputeBasis(const vec3 &f1a, const vec3 &f1b,
 	return nSolutions;
 }
 
-// Port of AreEdgesCompatibleForOBB().
-static bool AreEdgesCompatibleForOBB(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b)
+// Returns false if no normal on the arc from f1a to f1b is perpendicular to a normal on the arc from f2a to f2b,
+// i.e. if no box can have two faces that are flush with the two edges of those arcs.
+/*
+	n1 = f1a*t + f1b*(1-t) = f1b + (f1a-f1b)*t
+	n2 = f2a*u + f2b*(1-u) = f2b + (f2a-f2b)*u
+
+	n1.n2 = 0
+
+	Does this equation have a solution within t & u \in [0,1]?
+
+	// The function f(t,u) = n1.n2 is continuous and bilinear
+	// with respect to t and u, so test the four corners to get the minimum
+	// and maximum of the function. If minimum <= 0 and
+	// maximum >= 0, we know it must have a zero inside t,u \in [0,1].
+*/
+// The tolerance makes this a safe quick test for ComputeBasis(), which lets t and u be 1e-4 off their arcs (that
+// changes n1.n2 by at most 4e-4) and takes |n1.n2| < 1e-3 for perpendicular.
+static bool CanBePerpendicular(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b)
 {
-	const vec3 f1a_f1b = f1a - f1b;
-	const vec3 f2a_f2b = f2a - f2b;
-	float a = dot(f1b, f2b);
-	float b = dot(f1a_f1b, f2b);
-	float c = dot(f2a_f2b, f1b);
-	float d = dot(f1a_f1b, f2a_f2b);
+	const float tolerance = 2e-3f;
+	float aa = dot(f1a, f2a), ab = dot(f1a, f2b), ba = dot(f1b, f2a), bb = dot(f1b, f2b);
+	return fminf(fminf(aa, ab), fminf(ba, bb)) <= tolerance && fmaxf(fmaxf(aa, ab), fmaxf(ba, bb)) >= -tolerance;
+}
 
-	/*
-		n1 = f1a*t + f1b*(1-t) = f1b + (f1a-f1b)*t
-		n2 = f2a*u + f2b*(1-u) = f2b + (f2a-f2b)*u
+// Tells whether a box can have its three faces flush with three edges at once, as far as a quick test can
+// tell: this is for telling that ComputeBasis() has no solution, and for following the solutions of two edges
+// over the hull. The first two edges are given by the ends f1a, f1b and f2a, f2b of their arcs of normals, and
+// by the unit normals e1 and e2 of the great circles of those arcs (the directions of the edges, that is).
+// A unit vector n3 is the third axis of a box whose other two axes are on the two great circles, if those axes,
+// which are then along e1 x n3 and e2 x n3, are perpendicular to each other: if (e1 x n3).(e2 x n3) =
+// e1.e2 - (e1.n3)(e2.n3) is zero. For n3 = f3b + (f3a - f3b) v on the arc of the third edge, of the squared
+// length 1 - v (1 - v) |f3a - f3b|^2, this times that squared length is a quadratic polynomial q(v).
+// The third axis can only be on the part of the third arc where |q| is at most `tolerance`, which is for the
+// rounding errors. (ComputeBasis() accepts more than that: its tolerances, |n1.n2| < 1e-3 and so on, allow |q|
+// to be up to 3e-3. But those are there so as not to miss the solutions that are at an end of an arc.)
+// And then the other two axes have to be on the arcs of their edges, not just on the great circles: that part
+// of the third arc must have a normal that is perpendicular to a normal on the first arc, and one that is
+// perpendicular to a normal on the second arc, see CanBePerpendicular().
+// If the third axis can be on the arc, `range` is set to the part of the arc where: from f3b at 0 to f3a at 1.
+static bool CanBeThirdAxis(const vec3 &f1a, const vec3 &f1b, const vec3 &e1, const vec3 &f2a, const vec3 &f2b, const vec3 &e2,
+	float e1e2, float tolerance, const vec3 &f3a, const vec3 &f3b, float arcLengthSq, float *range)
+{
+	const float pa = dot(e1, f3a), pb = dot(e1, f3b), ra = dot(e2, f3a), rb = dot(e2, f3b);
+	const float q0 = e1e2 - pb * rb, q1 = e1e2 - pa * ra; // q(0) and q(1).
+	const float a = e1e2 * arcLengthSq - (pa - pb) * (ra - rb), b = q1 - q0 - a; // q(v) = a v^2 + b v + q0.
+	if (fabsf(q0) > tolerance && fabsf(q1) > tolerance)
+	{
+		if (q0 * q1 > 0.f)
+		{
+			// The usual case, and the end of it: q is far from zero and of the same sign at both ends of the arc,
+			// and so is its extreme value in between, at v = -b / 2a, if it has one there.
+			if (!(a > 0.f ? b < 0.f && -b < 2.f * a : b > 0.f && b < -2.f * a))
+				return false;
+			const float extreme = q0 - 0.25f * b * b / a;
+			if (extreme * q0 > 0.f && fabsf(extreme) > tolerance)
+				return false;
+		}
+		else
+		{
+			// The other usual case: q changes its sign on the arc, so it has one root there, and the third axis
+			// can only be there. (The roots are computed without cancellation. A division by zero gives a
+			// root that is not in [0, 1].)
+			const float r = -0.5f * (b + (b < 0.f ? -1.f : 1.f) * sqrtf(b * b - 4.f * a * q0));
+			const float root = r / a >= 0.f && r / a <= 1.f ? r / a : q0 / r;
+			if (root >= 0.f && root <= 1.f)
+			{
+				range[0] = range[1] = root;
+				const vec3 n3 = f3b + (f3a - f3b) * root;
+				return CanBePerpendicular(f1a, f1b, n3, n3) && CanBePerpendicular(f2a, f2b, n3, n3);
+			}
+		}
+	}
+	// The first and the last v in [0, 1] at which |q| is within the tolerance: the end of the arc, or else where
+	// q first reaches the tolerance when coming from that end.
+	for(int end = 0; end < 2; ++end)
+	{
+		const float q = end == 0 ? q0 : q1;
+		range[end] = (float)end;
+		if (fabsf(q) <= tolerance)
+			continue;
+		const float c = q0 - (q > 0.f ? tolerance : -tolerance);
+		const float discriminant = b * b - 4.f * a * c;
+		if (!(discriminant >= 0.f))
+			return false;
+		const float r = -0.5f * (b + (b < 0.f ? -1.f : 1.f) * sqrtf(discriminant));
+		const float roots[2] = { r / a, c / r };
+		range[end] = -1.f;
+		for(int k = 0; k < 2; ++k)
+			if (roots[k] > 0.f && roots[k] < 1.0001f && (range[end] < 0.f || (roots[k] < range[end]) == (end == 0)))
+				range[end] = fminf(roots[k], 1.f);
+		if (range[end] < 0.f)
+			return false;
+	}
+	const vec3 n3a = f3b + (f3a - f3b) * range[0], n3b = f3b + (f3a - f3b) * range[1];
+	return CanBePerpendicular(f1a, f1b, n3a, n3b) && CanBePerpendicular(f2a, f2b, n3a, n3b);
+}
 
-		n1.n2 = 0
-		a + t*b + u*c + t*u*d = 0
-
-		Does this equation have a solution within t & u \in [0,1]?
-
-		// The function f(t,u) = a + t*b + u*c + t*u*d is continuous and bilinear
-		// with respect to t and u, so test the four corners to get the minimum
-		// and maximum of the function. If minimum <= 0 and
-		// maximum >= 0, we know it must have a zero inside t,u \in [0,1].
-
-		t=0: f(t,u)=a+uc   => min: a, max: a+c
-		u=0: f(t,u)=a+tb   => min: a, max: a+b
-		t=1: f(t,u)=a+uc + b+ud  => min: a+b, max: a+b+c+d
-		u=1: f(t,u)=a+tb + c+td  => min: a+c, max: a+b+c+d
-	*/
-	float ab = a + b;
-	float ac = a + c;
-	float abcd = ab + c + d;
-	float minVal = fminf(fminf(a, ab), fminf(ac, abcd));
-	float maxVal = fmaxf(fmaxf(a, ab), fmaxf(ac, abcd));
-	return minVal <= 0.f && maxVal >= 0.f;
+// The boxes that have a face flush with each of two edges have the normals n1 = f1b + (f1a - f1b) t and
+// n2 = f2b + (f2a - f2b) u of those faces perpendicular to each other: a + b t + c u + d t u = 0, with t and u in
+// [0, 1]. They come in one or two families, in each of which the box turns from one end of the family to the
+// other. Appends the direction n1 x n2 of the third axis of one box of each family to `axes`.
+static void ThirdAxesOfBoxes(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const vec3 &f2b, std::vector<vec3> &axes)
+{
+	const dvec3 base[2] = { f1b, f2b }, step[2] = { dvec3(f1a) - dvec3(f1b), dvec3(f2a) - dvec3(f2b) };
+	const double a = dot(base[0], base[1]), d = dot(step[0], step[1]);
+	{
+		// Usually there is one family, with a box in the middle of the first arc: u is within [0, 1] at t = 1/2,
+		// and has no pole at any t of [0, 1].
+		const double b = dot(step[0], base[1]), c = dot(step[1], base[0]);
+		const double u = -(a + b * 0.5) / (c + d * 0.5), pole = -c / d;
+		if (u >= 0.0 && u <= 1.0 && !(pole >= 0.0 && pole <= 1.0))
+		{
+			axes.push_back(Normalized(cross(base[0] + step[0] * 0.5, base[1] + step[1] * u)).ToFloat());
+			return;
+		}
+	}
+	// As a function of t, u = -(a + b t) / (c + d t) is monotonic on each side of its pole t = -c/d. So between
+	// the pole and where u crosses 0 and 1, u is either within [0, 1] or it is not: take the middle of each such
+	// interval of t in which it is. Should there be none, there may still be boxes that all have the same t:
+	// then do the same with u as a function of t. (The 1e-4 is the tolerance of ComputeBasis().)
+	for (int swapped = 0; swapped < 2 && axes.empty(); ++swapped)
+	{
+		const double b = dot(step[swapped], base[1 - swapped]), c = dot(step[1 - swapped], base[swapped]);
+		double cuts[5] = { 0.0, 1.0, -a / b, -(a + c) / (b + d), -c / d };
+		int n = 2;
+		for (int k = 2; k < 5; ++k)
+			if (cuts[k] > 0.0 && cuts[k] < 1.0)
+				cuts[n++] = cuts[k];
+		std::sort(cuts, cuts + n);
+		for (int k = 0; k + 1 < n; ++k)
+		{
+			const double x = (cuts[k] + cuts[k + 1]) * 0.5;
+			const double y = -(a + b * x) / (c + d * x);
+			if (y >= -1e-4 && y <= 1.0 + 1e-4)
+			{
+				const dvec3 n1 = base[swapped] + step[swapped] * x;
+				const dvec3 n2 = base[1 - swapped] + step[1 - swapped] * std::min(std::max(y, 0.0), 1.0);
+				axes.push_back(Normalized(swapped ? cross(n2, n1) : cross(n1, n2)).ToFloat());
+			}
+		}
+	}
 }
 
 // Port of AreCompatibleOpposingEdges().
@@ -1011,6 +1118,33 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 	TestBox(hullV, n1, n2, volume, minVolume, minOBB);
 }
 
+// Climbs along the edges of the hull from startingVertex, each time to the neighbor that is the farthest along
+// `direction`, and returns the vertex that has no neighbor farther along it. On a convex polyhedron that is an
+// extreme vertex, unless the climb ends where vertices tie: see ExtremeVertexConvex(), which this is a cheaper
+// substitute for when any vertex that is far along the direction will do.
+static int ClimbAlong(const std::vector<vec3> &vtx, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, int startingVertex)
+{
+	int v = startingVertex;
+	float d = dot(direction, vtx[v]);
+	for(;;)
+	{
+		const std::vector<int> &neighbors = adjacencyData[v];
+		int farthest = v;
+		for(size_t i = 0; i < neighbors.size(); ++i)
+		{
+			float neighborD = dot(direction, vtx[neighbors[i]]);
+			if (neighborD > d)
+			{
+				d = neighborD;
+				farthest = neighbors[i];
+			}
+		}
+		if (farthest == v)
+			return v;
+		v = farthest;
+	}
+}
+
 // Finds the vertex of the hull that is the farthest along `direction`, by climbing along the edges of the
 // hull, starting from startingVertex. On a convex polyhedron the vertices that are at least as far as any
 // given distance are connected, so the climb can only come to a halt too early where vertices tie: on a
@@ -1018,11 +1152,23 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 // plateau is therefore searched through for a vertex that is farther still.
 // If `ties` is given, the returned vertex and all the vertices that tie with it are appended to it.
 static int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction,
-	std::vector<unsigned int> &floodFillVisited, unsigned int floodFillVisitColor,
+	std::vector<unsigned long long> &floodFillVisited, unsigned long long floodFillVisitColor,
 	float &mostExtremeDistance, int startingVertex, std::vector<int> *ties = 0)
 {
 	TRACE_EVC_CALL();
 	const float plateauEpsilon = 1e-4f;
+	if (!ties)
+	{
+		// Usually there are no ties where the plain climb ends: then that is the extreme vertex.
+		startingVertex = ClimbAlong(hull.v, adjacencyData, direction, startingVertex);
+		mostExtremeDistance = dot(direction, hull.v[startingVertex]);
+		const std::vector<int> &neighbors = adjacencyData[startingVertex];
+		bool tied = false;
+		for(size_t i = 0; i < neighbors.size() && !tied; ++i)
+			tied = dot(direction, hull.v[neighbors[i]]) >= mostExtremeDistance - plateauEpsilon;
+		if (!tied)
+			return startingVertex;
+	}
 	static thread_local std::vector<int> plateau, visited;
 	plateau.clear();
 	visited.clear();
@@ -1087,12 +1233,16 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	  2. Precompute face normal direction vectors, since these are needed often. (does not affect big-O complexity, just a micro-opt) O(F)
 	  3. Compute edge adjacency data, i.e. given an edge, return the two indices of its neighboring faces. O(V)
 	  4. Precompute antipodal vertices for each edge. O(A*ElogV), where A is the size of antipodal vertices per edge. A ~ O(1) on average.
-	  5. Precompute all sidepodal edges for each edge. O(E*S), where S is the size of sidepodal edges per edge. S ~ O(sqrtE) on average.
-	     - Sort the sidepodal edges to a linear order so that it's possible to do fast set intersection computations on them. O(E*S*logS), or O(E*sqrtE*logE).
-	  6. Test all configurations where all three edges are on adjacent faces. O(E*S^2) = O(E^2) or if smart with graph search, O(ES) = O(E*sqrtE)?
-	  7. Test all configurations where two edges are on opposing faces, and the third one is on a face adjacent to the two. O(E*sqrtE*logV)?
-	  8. Test all configurations where two edges are on the same face (OBB aligns with a face of the convex hull). O(F*sqrtE*logV).
+	  5. Compute for each edge lower bounds for the width of the hull along the normals of the box faces that can be
+	     flush with the edge, and for the volume of the boxes that have such a face. O(E)
+	     The steps below skip whatever these bounds show to be no smaller than the best box found so far.
+	  6. Test all configurations where two edges are on opposing faces, and the third one is on a face adjacent to the two. O(E*sqrtE*logV)?
+	  7. Test all configurations where two edges are on the same face (OBB aligns with a face of the convex hull). O(F*sqrtE*logV).
+	  8. Test all configurations where all three edges are on adjacent faces. O(ES) = O(E*sqrtE)?, where S is the size
+	     of sidepodal edges per edge, S ~ O(sqrtE) on average: for each edge and each of its sidepodal edges, the
+	     third edges are found by a graph search along the boxes that are flush with the two.
 	  9. Return the best found OBB.
+	  The sidepodal edges of an edge are computed when steps 6-8 first need them. O(S) per edge.
 	*/
 
 	OBB minOBB;
@@ -1188,8 +1338,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	// visited vertices. At any given time, the vertices that have already been visited have the value
 	// floodFillVisited[i] == floodFillVisitColor in them. This gives a win that we can perform constant-time
 	// clears of the floodFillVisited array, by simply incrementing the "color" counter to clear the array.
-	std::vector<unsigned int> floodFillVisited(hull.v.size());
-	unsigned int floodFillVisitColor = 1;
+	// (The counter has 64 bits, so that it cannot wrap around.)
+	std::vector<unsigned long long> floodFillVisited(hull.v.size());
+	unsigned long long floodFillVisitColor = 1;
 
 	// As a syntactic aid, use the helpers MARK_VISITED(v), HAVE_VISITED_VERTEX(v) and CLEAR_GRAPH_SEARCH to
 	// remind of the conceptual meaning of these values.
@@ -1266,6 +1417,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	// the opposing face of an enclosing OBB of the face that is flush with the given edge of the polyhedron).
 	// This is O(E*log(V)) ?
 	long antiFallbacks = 0;
+	long sidepodalSearches = 0, edgePairs = 0, edgePairsSearched = 0, edgeTriplets = 0, edgeTripletsSolved = 0, thirdEdgesTested = 0;
 	//for (size_t i = 0; i < edges.size(); ++i) // O(E)
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
@@ -1319,35 +1471,167 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0), antiFallbacks);
 	TRACE_EVC_RESET(evcCalls0, evcSteps0);
 
-	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with.
-	std::vector<std::vector<int>> compatibleEdges(E);
-
-	// Use an O(E*V) data structure for sidepodal vertices: one bit for each vertex of each edge.
-	std::vector<unsigned int> sidepodalVertices(((size_t)E * V + 31) / 32, 0);
-	auto IsSidepodalVertex = [&](size_t edge, int vertex) -> bool
+	// For each edge: the normals of its two faces, i.e. the ends of the arc of the normals that a face of a box
+	// can have when it is flush with the edge; the unit vector in the middle of that arc, and the distance from
+	// there to the ends of the arc.
+	// Also the unit normal of the great circle of the arc, which is the direction of the edge, and the squared
+	// distance between the ends of the arc.
+	std::vector<vec3> edgeNormalA(E), edgeNormalB(E), arcMiddle(E), arcAxis(E);
+	std::vector<float> arcChord(E), arcLengthSq(E);
+	// For each edge, a lower bound for the width of the hull along the normals on its arc: for one dimension
+	// of the boxes that have a face flush with the edge. With e a point of the edge and p any vertex, the hull
+	// is at least n.(e - p) wide along n. For an n on the arc from fa to fb that is at least the smaller of
+	// fa.(e - p) and fb.(e - p), if positive: n is fa and fb combined with weights that are not negative and
+	// add up to at least one. The antipodal vertices of the edge are the vertices p to try.
+	// The bounds are lowered by widthMargin, which is far more than what the rounding of the face normals and
+	// of the box axes to floats can change a width by.
+	const double widthMargin = 1e-4;
+	std::vector<float> minWidth(E);
+	float smallestMinWidth = FLT_MAX;
+	for (int e = 0; e < E; ++e)
 	{
-		size_t bit = edge * V + vertex;
-		return ((sidepodalVertices[bit >> 5] >> (bit & 31)) & 1) != 0;
+		edgeNormalA[e] = faceNormals[facesForEdge[e].first];
+		edgeNormalB[e] = faceNormals[facesForEdge[e].second];
+		arcMiddle[e] = Normalized(edgeNormalA[e] + edgeNormalB[e]);
+		arcChord[e] = sqrtf(std::max(LengthSq(edgeNormalA[e] - arcMiddle[e]), LengthSq(edgeNormalB[e] - arcMiddle[e])));
+		arcAxis[e] = Normalized(cross(dvec3(edgeNormalA[e]), dvec3(edgeNormalB[e]))).ToFloat();
+		arcLengthSq[e] = LengthSq(edgeNormalA[e] - edgeNormalB[e]);
+		if (IS_INTERNAL_EDGE(e))
+			continue;
+		double width = 0.0;
+		for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
+		{
+			const dvec3 d = dvec3(vtx[edges[e].first]) - dvec3(vtx[antipodalPointsForEdge[e][j]]);
+			width = std::max(width, std::min(dot(dvec3(edgeNormalA[e]), d), dot(dvec3(edgeNormalB[e]), d)));
+		}
+		minWidth[e] = (float)std::max(width - widthMargin, 0.0);
+		smallestMinWidth = std::min(smallestMinWidth, minWidth[e]);
+	}
+
+	// Take advantage of spatial locality: start the search for the extreme vertex along a direction from the
+	// extreme vertex that an earlier search along a similar direction found. For that, the directions are
+	// divided into cells (the six faces of a cube, each cut into a grid of squares), and for each cell the
+	// vertex is stored that the last search along a direction of the cell ended at. As that vertex is far
+	// along the other directions of the cell too, it also gives a lower bound for how far the hull extends
+	// along them, without any search.
+	const int hintGrid = std::min(std::max((int)sqrt(V / 48.0), 1), 32);
+	std::vector<int> extremeVertexSearchHints(6 * hintGrid * hintGrid, 0);
+	auto extremeVertexSearchHint = [&](const vec3 &direction) -> int &
+	{
+		const vec3 a = abs(direction);
+		const int axis = a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);
+		if (!(a[axis] > 0.f)) // A zero vector, or NaNs.
+			return extremeVertexSearchHints[0];
+		const float scale = hintGrid * 0.5f / a[axis];
+		const float x = direction[(axis + 1) % 3] * scale + hintGrid * 0.5f, y = direction[(axis + 2) % 3] * scale + hintGrid * 0.5f;
+		const int cellX = x >= 0.f ? std::min((int)x, hintGrid - 1) : 0, cellY = y >= 0.f ? std::min((int)y, hintGrid - 1) : 0;
+		return extremeVertexSearchHints[((axis * 2 + (direction[axis] < 0.f)) * hintGrid + cellX) * hintGrid + cellY];
 	};
-	auto SetSidepodalVertex = [&](size_t edge, int vertex)
-	{
-		size_t bit = edge * V + vertex;
-		sidepodalVertices[bit >> 5] |= 1u << (bit & 31);
-	};
 
-	// Compute all sidepodal edges for each edge by performing a graph search. The set of sidepodal edges is
-	// connected in the graph, which lets us avoid having to iterate over each edge pair of the convex hull.
-	// Total running time is O(E*sqrtE).
-//	for(size_t i = 0; i < edges.size(); ++i) // O(E)
-	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+	// For each edge, a lower bound for the volume of the boxes that have a face flush with the edge. An edge for
+	// which that is no less than the volume of the best box so far is of no use to the search.
+	// The normal n1 of that face of the box is on the arc of the edge, where the hull is at least minWidth wide.
+	// The other two axes n2 and n3 of the box are perpendicular to n1. So they are at most as far from the plane
+	// that is perpendicular to the middle of the arc, as n1 is from that middle. In that plane, the hull is
+	// measured along numSamples directions and their opposites, by climbing to a vertex that is far along each.
+	// n2 and n3 are both within `turn` (as unit vectors) of one of those directions s. The two vertices found
+	// for s and -s, which are d apart, are at least d.s (1 - turn^2/2) - turn |d - (d.s) s| apart along such an
+	// axis, and the hull is at least that wide. As n2 and n3 are perpendicular, their two directions are a
+	// quarter of a turn apart, give or take `spread` samples. The smallest product of two such widths is a lower
+	// bound for the area of the face of the box that n2 and n3 span.
+	// On the side, the samples of each edge give a box to start the search with.
+	// Computing the bound of an edge takes about as long as finding a hundred sidepodal edges for it, which is
+	// more than the edges of a small hull have. So this is left out for small hulls: their bounds stay zero.
+	std::vector<double> minVolumeForEdge(E, 0.0);
+	if (spatialEdgeOrder.size() >= 512)
 	{
-		size_t i = (size_t)spatialEdgeOrder[ii];
-		vec3 f1a = faceNormals[facesForEdge[i].first];
-		vec3 f1b = faceNormals[facesForEdge[i].second];
+		const int numSamples = 32;
+		const double pi = 3.14159265358979323846;
+		std::vector<int> farVertex(2 * numSamples);
+		std::vector<vec3> sample(2 * numSamples);
+		std::vector<float> sampleCos(2 * numSamples), sampleSin(2 * numSamples);
+		std::vector<double> width(numSamples), widthBound(numSamples);
+		for (int k = 0; k < 2 * numSamples; ++k)
+		{
+			sampleCos[k] = (float)cos(k * pi / numSamples);
+			sampleSin[k] = (float)sin(k * pi / numSamples);
+		}
+		auto boundVolume = [&](int e)
+		{
+			vec3 basisU, basisV;
+			PerpendicularBasis(arcMiddle[e], basisU, basisV);
+			for (int k = 0; k < 2 * numSamples; ++k)
+			{
+				sample[k] = basisU * sampleCos[k] + basisV * sampleSin[k];
+				int &hint = extremeVertexSearchHint(sample[k]);
+				farVertex[k] = hint = ClimbAlong(vtx, adjacencyData, sample[k], hint);
+			}
+			const double chord = std::min((double)arcChord[e], 1.0);
+			const double turn = sqrt(std::max(2.0 - 2.0 * sqrt(1.0 - chord * chord), 0.0)) + 2.0 * sin(pi / (4.0 * numSamples)) + 1e-6;
+			for (int k = 0; k < numSamples; ++k)
+			{
+				const dvec3 d = dvec3(vtx[farVertex[k]]) - dvec3(vtx[farVertex[k + numSamples]]);
+				width[k] = dot(dvec3(sample[k]), d);
+				widthBound[k] = std::max(width[k] * (1.0 - turn * turn * 0.5) - turn * sqrt(std::max(dot(d, d) - width[k] * width[k], 0.0)) - widthMargin, 0.0);
+			}
+			const int spread = (int)ceil(asin(std::min(2.0 * turn + turn * turn, 1.0)) * numSamples / pi);
+			double area = DBL_MAX;
+			for (int k = 0; k < numSamples; ++k)
+				for (int j = numSamples / 2 - spread; j <= numSamples / 2 + spread; ++j)
+					area = std::min(area, widthBound[k] * widthBound[(k + j + numSamples) % numSamples]);
+			minVolumeForEdge[e] = minWidth[e] * area;
 
-		vec3 deadDirection = (f1a+f1b)*0.5f;
-		vec3 basis1, basis2;
-		PerpendicularBasis(deadDirection, basis1, basis2);
+			// The box to start with: the middle of the arc, and the two samples that make the smallest face.
+			int best = 0;
+			for (int k = 1; k < numSamples / 2; ++k)
+				if (width[k] * width[k + numSamples / 2] < width[best] * width[best + numSamples / 2])
+					best = k;
+			float minN1 = FLT_MAX;
+			for (size_t j = 0; j < antipodalPointsForEdge[e].size(); ++j)
+				minN1 = fminf(minN1, dot(arcMiddle[e], vtx[antipodalPointsForEdge[e][j]]));
+			TestBox(vtx, arcMiddle[e], sample[best], (float)((dot(arcMiddle[e], vtx[edges[e].first]) - minN1) * width[best] * width[best + numSamples / 2]),
+				&minVolume, &minOBB);
+		};
+		// How many edges this rules out depends on the shape of the hull: on a ball, where all boxes are about
+		// the same, it rules out none. So try it on every 16th edge first, and go on only if that pays off.
+		const size_t every = 16;
+		size_t ruledOut = 0;
+		for (size_t ii = 0; ii < spatialEdgeOrder.size(); ii += every)
+			boundVolume(spatialEdgeOrder[ii]);
+		for (size_t ii = 0; ii < spatialEdgeOrder.size(); ii += every)
+			ruledOut += minVolumeForEdge[spatialEdgeOrder[ii]] >= minVolume;
+		if (ruledOut * every * 10 >= spatialEdgeOrder.size())
+			for (size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+				if (ii % every != 0)
+					boundVolume(spatialEdgeOrder[ii]);
+	}
+
+	TRACE_MARK(t0, "obb: volume bounds of the edges");
+
+	// Stores for each edge i the list of all sidepodal edge indices j that it can form an OBB with: the edges
+	// that have a normal on their arc that is perpendicular to a normal on the arc of edge i (except for the
+	// edges that minVolumeForEdge rules out). The lists are stored one after another: the list of edge i is the
+	// range from compatibleEdgesBegin[i] to compatibleEdgesEnd[i] of compatibleEdges. The list of an edge is
+	// made by findSidepodalEdges() when it is first needed, which it never is for the edges that are ruled out.
+	std::vector<int> compatibleEdges;
+	std::vector<size_t> compatibleEdgesBegin(E, 0), compatibleEdgesEnd(E, 0);
+	std::vector<unsigned char> haveSidepodalEdges(E, 0);
+	// For the search for them: the smallest and the largest dot product of the normal of a face with the two
+	// normals of the current edge i, for the faces for which faceDotsOfEdge says that they are of edge i.
+	std::vector<float> faceMinDot(F), faceMaxDot(F);
+	std::vector<int> faceDotsOfEdge(F, -1);
+
+	// Computes the sidepodal edges of edge i, unless that is done already, by performing a graph search. The set
+	// of sidepodal edges is connected in the graph, which lets us avoid having to iterate over each edge pair of
+	// the convex hull. Total running time is O(E*sqrtE), if this is done for all edges.
+	auto findSidepodalEdges = [&](size_t i)
+	{
+		if (haveSidepodalEdges[i])
+			return;
+		haveSidepodalEdges[i] = 1;
+		TRACE_INC(sidepodalSearches);
+		vec3 f1a = edgeNormalA[i];
+		vec3 f1b = edgeNormalB[i];
 
 		// Start the search from the extreme vertex in a direction that is perpendicular to f1a: some of its
 		// edges are sidepodal to this edge. If several vertices tie as the extreme one (the direction is the
@@ -1357,6 +1641,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		CLEAR_GRAPH_SEARCH();
 		startingVertex = ExtremeVertexConvex(hull, adjacencyData, dir, floodFillVisited, floodFillVisitColor, dummy, startingVertex, &traverseStack); // O(log|V|)
 		CLEAR_GRAPH_SEARCH();
+		compatibleEdgesBegin[i] = compatibleEdges.size();
 		while(!traverseStack.empty()) // O(sqrt(E))
 		{
 			int v = traverseStack.back();
@@ -1372,213 +1657,129 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				if (HAVE_VISITED_VERTEX(vAdj))
 					continue;
 
+				// This is the test of CanBePerpendicular(), without the tolerance: the dot product of a normal on
+				// the arc of edge i with a normal on the arc of the other edge is between the dot products of the
+				// ends of the two arcs, i.e. of the normals of the two faces of each edge. Each face is shared by
+				// several of the edges that are tested here, so its two dot products are computed only once.
 				int edge = adjacentEdges[v][j];
-//				if (IS_INTERNAL_EDGE(edge))
-//					continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
-				if (AreEdgesCompatibleForOBB(f1a, f1b, faceNormals[facesForEdge[edge].first], faceNormals[facesForEdge[edge].second]))
-				{
-					if ((int)i <= edge)
+				const int faces[2] = { facesForEdge[edge].first, facesForEdge[edge].second };
+				for(int k = 0; k < 2; ++k)
+					if (faceDotsOfEdge[faces[k]] != (int)i)
 					{
-						if (!IS_INTERNAL_EDGE(edge))
-							compatibleEdges[i].push_back(edge);
-
-						SetSidepodalVertex(i, edges[edge].first);
-						SetSidepodalVertex(i, edges[edge].second);
-
-//						sidepodalVertices[i].insert(edges[edge].first);
-//						sidepodalVertices[i].insert(edges[edge].second);
-						if ((int)i != edge)
-						{
-//							vec3 f2a = faceNormals[facesForEdge[edge].first];
-//							vec3 f2b = faceNormals[facesForEdge[edge].second];
-
-							if (!IS_INTERNAL_EDGE(edge))
-								compatibleEdges[edge].push_back((int)i);
-//							sidepodalVertices[edge].insert(edges[i].first);
-//							sidepodalVertices[edge].insert(edges[i].second);
-							SetSidepodalVertex(edge, edges[i].first);
-							SetSidepodalVertex(edge, edges[i].second);
-//							sidepodalVerticesForEdge[edge].push_back(edges[i].first);
-//							sidepodalVerticesForEdge[edge].push_back(edges[i].second);
-//							++numSmallerCompatibleEdgeIndices[edge];
-						}
+						faceDotsOfEdge[faces[k]] = (int)i;
+						float a = dot(f1a, faceNormals[faces[k]]), b = dot(f1b, faceNormals[faces[k]]);
+						faceMinDot[faces[k]] = fminf(a, b);
+						faceMaxDot[faces[k]] = fmaxf(a, b);
 					}
+				if (fminf(faceMinDot[faces[0]], faceMinDot[faces[1]]) <= 0.f && fmaxf(faceMaxDot[faces[0]], faceMaxDot[faces[1]]) >= 0.f)
+				{
+					// Edges inside faces with 180 degrees dihedral angles can be ignored.
+					if (!IS_INTERNAL_EDGE(edge) && minVolumeForEdge[edge] < minVolume)
+						compatibleEdges.push_back(edge);
 					traverseStack.push_back(vAdj);
 				}
 			}
 		}
-	}
+		compatibleEdgesEnd[i] = compatibleEdges.size();
+	};
 
-	TRACE_FMT(t0, "obb: sidepodal precompute (evc calls=%ld steps=%ld)",
-		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
-	TRACE_EVC_RESET(evcCalls0, evcSteps0);
-
-	// Take advantage of spatial locality: start the search for the extreme vertex from the extreme vertex
-	// that was found during the previous iteration for the previous edge. This speeds up the search since
-	// edge directions have some amount of spatial locality and the next extreme vertex is often close
-	// to the previous one. Track two hint variables since we are performing extreme vertex searches to
-	// two opposing directions at the same time.
-	int extremeVertexSearchHint1 = 0;
-	int extremeVertexSearchHint2 = 0;
-	int extremeVertexSearchHint3 = 0;
-	int extremeVertexSearchHint4 = 0;
-	int extremeVertexSearchHint1_b = 0;
-	int extremeVertexSearchHint2_b = 0;
-	int extremeVertexSearchHint3_b = 0;
-
-	// Stores a memory of yet unvisited vertices that are common sidepodal vertices to both currently chosen edges for current graph search.
-	std::vector<int> traverseStackCommonSidepodals;
-
-	// Category 1: all configurations where the OBB is flush with three edges on adjacent faces.
-//	for(size_t i = 0; i < edges.size(); ++i) // O(|E|)
-	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+	// Categories 2 and 3 both fix one axis n1 of the box: the normal of a face of the box that is flush with
+	// two edges of the hull at once. The hull extends from minN1 to maxN1 along it. This tests the boxes that
+	// have that axis, and another face flush with an edge that is sidepodal to edge e1, one of those two edges.
+	auto searchAxis = [&](const vec3 &n1, float minN1, float maxN1, size_t e1)
 	{
-		size_t i = (size_t)spatialEdgeOrder[ii];
-		vec3 f1a = faceNormals[facesForEdge[i].first];
-		vec3 f1b = faceNormals[facesForEdge[i].second];
-
-		vec3 deadDirection = (f1a+f1b)*0.5f;
-
-//		vec3 e1 = (vec3(hull.v[edges[i].first]) - vec3(hull.v[edges[i].second])).Normalized();
-
-		const std::vector<int> &compatibleEdgesI = compatibleEdges[i];
-
-		for(size_t j = 0; j < compatibleEdgesI.size(); ++j) // O(sqrt(|E|))?
+		findSidepodalEdges(e1);
+		for(size_t j = compatibleEdgesBegin[e1]; j < compatibleEdgesEnd[e1]; ++j)
 		{
-			int edgeJ = compatibleEdgesI[j];
-			if (edgeJ <= (int)i) continue; // Remove symmetry.
-			vec3 f2a = faceNormals[facesForEdge[edgeJ].first];
-			vec3 f2b = faceNormals[facesForEdge[edgeJ].second];
-			if (AreEdgesBad(f1a, f1b, f2a, f2b)) continue;
+			int edge3 = compatibleEdges[j];
+			if (minVolumeForEdge[edge3] >= minVolume)
+				continue;
+			const vec3 &f3a = edgeNormalA[edge3];
+			const vec3 &f3b = edgeNormalB[edge3];
 
-			vec3 deadDirection2 = (f2a+f2b)*0.5f;
+			// Is edge3 compatible with direction n?
+			// n3 = f3b + (f3a-f3b)*v
+			// n1.n3 = 0
+			// n1.(f3b + (f3a-f3b)*v) = 0
+			// n1.f3b + n1.((f3a-f3b)*v) = 0
+			// n1.f3b = (n1.(f3b-f3a))*v
+			// If n1.(f3b-f3a) != 0:
+			//    v = n1.f3b / n1.(f3b-f3a)
+			// If n1.(f3b-f3a) == 0:
+			//    n1.f3b must be zero as well, then arbitrary v is ok.
+			float num = dot(n1, f3b);
+			float denom = dot(n1, f3b-f3a);
+			MoveSign(num, denom);
 
-			vec3 searchDir = cross(deadDirection, deadDirection2);
-			float len = Normalize(searchDir);
-			if (len == 0.f)
+			const float epsilon = 1e-4f;
+			if (denom < epsilon)
 			{
-				searchDir = cross(f1a, f2a);
-				len = Normalize(searchDir);
-				if (len == 0.f)
-					searchDir = Perpendicular(f1a);
+				num = EqualAbs(num, 0.f) ? 0.f : -1.f;
+				denom = 1.f;
 			}
 
-			CLEAR_GRAPH_SEARCH();
-			float dummy;
-			extremeVertexSearchHint1 = ExtremeVertexConvex(hull, adjacencyData, searchDir, floodFillVisited, floodFillVisitColor, dummy, extremeVertexSearchHint1); // O(log|V|)?
-			CLEAR_GRAPH_SEARCH();
-			extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -searchDir, floodFillVisited, floodFillVisitColor, dummy, extremeVertexSearchHint2); // O(log|V|)?
+			if (!(num >= denom * -epsilon && num <= denom * (1.f + epsilon))) // v >= -epsilon && v <= 1 + epsilon
+				continue;
 
-// Enable new smarter search for sidepodal vertices. Should be always on.
-#define SECOND_GUESS_SIDEPODALS
+			float v = num / denom;
+			vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
+			vec3 n2 = Normalized(cross(n3, n1));
 
-			int secondSearch = -1;
-#ifdef SECOND_GUESS_SIDEPODALS
-			if (IsSidepodalVertex(edgeJ, extremeVertexSearchHint1)) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
-			else traverseStack.push_back(extremeVertexSearchHint1);
-			if (IsSidepodalVertex(edgeJ, extremeVertexSearchHint2)) traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
-			else secondSearch = extremeVertexSearchHint2;//traverseStack.push_back(extremeVertexSearchHint2);
-#else
-			traverseStackCommonSidepodals.push_back(extremeVertexSearchHint1);
-			traverseStackCommonSidepodals.push_back(extremeVertexSearchHint2);
-#endif
+			float maxN3 = dot(n3, hull.v[edges[edge3].first]);
 
-			// Bootstrap to a good vertex that is sidepodal to both edges.
-			CLEAR_GRAPH_SEARCH();
-			while(!traverseStack.empty())
+			const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edge3];
+			const bool fewAntipodals = antipodalsEdge3.size() < 20;
+			int &extremeVertexSearchHint1 = extremeVertexSearchHint(n2);
+			int &extremeVertexSearchHint2 = extremeVertexSearchHint(-n2);
+			int &extremeVertexSearchHint3 = fewAntipodals ? extremeVertexSearchHint1 : extremeVertexSearchHint(-n3); // (Used only if not few.)
+			float minN3 = FLT_MAX;
+			if (fewAntipodals) // If there are very few antipodal vertices, do a very tight loop and just iterate over each.
 			{
-				int v = traverseStack.front();
-				traverseStack.erase(traverseStack.begin());
-				if (HAVE_VISITED_VERTEX(v))
-					continue;
-				MARK_VERTEX_VISITED(v);
-				const std::vector<int> &n = adjacencyData[v];
-				for(size_t k = 0; k < n.size(); ++k)
-				{
-					int vAdj = n[k];
-					if (!HAVE_VISITED_VERTEX(vAdj) && IsSidepodalVertex(i, vAdj))
-					{
-						if (IsSidepodalVertex(edgeJ, vAdj))
-						{
-							traverseStack.clear();
-							if (secondSearch != -1)
-							{
-								traverseStack.push_back(secondSearch);
-								secondSearch = -1;
-								MARK_VERTEX_VISITED(vAdj);
-							}
-							traverseStackCommonSidepodals.push_back(vAdj);
-							break;
-						}
-						else
-							traverseStack.push_back(vAdj);
-					}
-				}
+				for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
+					minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
+				if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
+			}
+			else
+				minN3 = -dot(-n3, hull.v[extremeVertexSearchHint3]); // For now. The extreme vertex is searched for below.
+
+			// A search for an extreme vertex can only find a vertex that is farther along its direction than
+			// the vertex it starts from. So if the box is no smaller than the best box already when measured
+			// with the vertices that the searches would start from, there is no need to search.
+			if (maxN1 >= minN1 && maxN3 >= minN3
+				&& (maxN1 - minN1) * (dot(n2, hull.v[extremeVertexSearchHint1]) + dot(-n2, hull.v[extremeVertexSearchHint2])) * (maxN3 - minN3) >= minVolume)
+				continue;
+
+			float minN2, maxN2;
+			CLEAR_GRAPH_SEARCH();
+			extremeVertexSearchHint1 = ExtremeVertexConvex(hull, adjacencyData, n2, floodFillVisited, floodFillVisitColor, maxN2, extremeVertexSearchHint1); // O(logV)?
+			CLEAR_GRAPH_SEARCH();
+			extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, extremeVertexSearchHint2); // O(logV)?
+			minN2 = -minN2;
+			if (maxN2 < minN2) std::swap(minN2, maxN2); // XXX Numerical stability hack
+
+			if (!fewAntipodals)
+			{
+				// Otherwise perform a spatial locality exploiting graph search.
+				CLEAR_GRAPH_SEARCH();
+				extremeVertexSearchHint3 = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, extremeVertexSearchHint3); // O(logV)?
+				minN3 = -minN3;
+				if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
 			}
 
-			CLEAR_GRAPH_SEARCH();
-			while(!traverseStackCommonSidepodals.empty())
-			{
-				int v = traverseStackCommonSidepodals.back();
-				traverseStackCommonSidepodals.pop_back();
-				if (HAVE_VISITED_VERTEX(v))
-					continue;
-				MARK_VERTEX_VISITED(v);
-				const std::vector<int> &n = adjacencyData[v];
-				for(size_t k = 0; k < n.size(); ++k)
-				{
-					int vAdj = n[k];
-					int edgeK = adjacentEdges[v][k];
-					if (IS_INTERNAL_EDGE(edgeK))
-						continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
-					if (IsSidepodalVertex(i, vAdj)
-						&& IsSidepodalVertex(edgeJ, vAdj))
-					{
-						if (!HAVE_VISITED_VERTEX(vAdj))
-							traverseStackCommonSidepodals.push_back(vAdj);
-
-						if (edgeJ < edgeK)
-						{
-							// Test edge triplet i, edgeJ, edgeK.
-							vec3 f3a = faceNormals[facesForEdge[edgeK].first];
-							vec3 f3b = faceNormals[facesForEdge[edgeK].second];
-
-							if (!AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
-							{
-								vec3 n1[2], n2[2], n3[2];
-								int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
-								for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
-								{
-									TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
-										edges, antipodalPointsForEdge, &minVolume, &minOBB);
-								}
-							}
-						}
-					}
-				}
-			}
+			float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
+			TestBox(hull.v, n1, n2, volume, &minVolume, &minOBB);
 		}
-	}
-
-	TRACE_FMT(t0, "obb: category 1: 3 adjacent faces (evc calls=%ld steps=%ld)",
-		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
-	TRACE_EVC_RESET(evcCalls0, evcSteps0);
-
-	std::vector<int> antipodalEdges;
-	std::vector<vec3> antipodalEdgeNormals;
+	};
 
 	// Category 2: main algorithm body for finding all search directions where the OBB is flush with the
 	// edges of the convex hull from two opposing faces. This is O(E*sqrtE*logV)?
-//	for (size_t i = 0; i < edges.size(); ++i) // O(E)
-///	{
 	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
 	{
 		size_t i = (size_t)spatialEdgeOrder[ii];
-		vec3 f1a = faceNormals[facesForEdge[i].first];
-		vec3 f1b = faceNormals[facesForEdge[i].second];
-
-		antipodalEdges.clear();
-		antipodalEdgeNormals.clear();
+		if (minVolumeForEdge[i] >= minVolume)
+			continue;
+		vec3 f1a = edgeNormalA[i];
+		vec3 f1b = edgeNormalB[i];
 
 		const std::vector<int> &antipodals = antipodalPointsForEdge[i];
 		for(size_t j = 0; j < antipodals.size(); ++j) // O(constant)?
@@ -1596,100 +1797,15 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 					continue;
 				if (IS_INTERNAL_EDGE(edge))
 					continue; // Edges inside faces with 180 degrees dihedral angles can be ignored.
+				if (minVolumeForEdge[edge] >= minVolume)
+					continue;
 
-				vec3 f2a = faceNormals[facesForEdge[edge].first];
-				vec3 f2b = faceNormals[facesForEdge[edge].second];
-
+				// The normal of the two opposing faces of the box, if the two edges can be flush with such.
 				vec3 n;
-				bool success = AreCompatibleOpposingEdges(f1a, f1b, f2a, f2b, n);
-				if (success)
+				if (AreCompatibleOpposingEdges(f1a, f1b, edgeNormalA[edge], edgeNormalB[edge], n))
 				{
-					antipodalEdges.push_back(edge);
-					antipodalEdgeNormals.push_back(Normalized(n));
-				}
-			}
-		}
-
-		const std::vector<int> &compatibleEdgesI = compatibleEdges[i];
-		for(size_t j = 0; j < compatibleEdgesI.size(); ++j)
-//		for(size_t j = 0; j < antipodalEdges.size(); ++j)
-		{
-			int edgeJ = compatibleEdgesI[j];
-//			const std::vector<int> &compatibleEdgesJ = compatibleEdges[edge];
-//			n = n.Normalized();
-			for(size_t k = 0; k < antipodalEdges.size(); ++k)
-			{
-				int edgeK = antipodalEdges[k];
-
-				vec3 n = antipodalEdgeNormals[k];
-				float minN1 = dot(n, hull.v[edges[edgeK].first]);
-				float maxN1 = dot(n, hull.v[edges[i].first]);
-
-				// Test all mutual compatible edges.
-				vec3 f3a = faceNormals[facesForEdge[edgeJ].first];
-				vec3 f3b = faceNormals[facesForEdge[edgeJ].second];
-				// Is edge3 compatible with direction n?
-				// n3 = f3b + (f3a-f3b)*v
-				// n1.n3 = 0
-				// n1.(f3b + (f3a-f3b)*v) = 0
-				// n1.f3b + n1.((f3a-f3b)*v) = 0
-				// n1.f3b = (n1.(f3b-f3a))*v
-				// If n1.(f3b-f3a) != 0:
-				//    v = n1.f3b / n1.(f3b-f3a)
-				// If n1.(f3b-f3a) == 0:
-				//    n1.f3b must be zero as well, then arbitrary v is ok.
-				float num = dot(n, f3b);
-				float denom = dot(n, f3b-f3a);
-				MoveSign(num, denom);
-
-				const float epsilon = 1e-4f;
-				if (denom < epsilon)//EqualAbs(denom, 0.f))
-				{
-					num = EqualAbs(num, 0.f) ? 0.f : -1.f;
-					denom = 1.f;
-				}
-
-//				if (v >= 0.f - epsilon && v <= 1.f + epsilon)
-				if (num >= denom * -epsilon && num <= denom * (1.f + epsilon))
-				{
-					float v = num / denom;
-					vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
-					vec3 n2 = Normalized(cross(n3, n));
-
-					float minN2, maxN2;
-
-					CLEAR_GRAPH_SEARCH();
-					int hint = ExtremeVertexConvex(hull, adjacencyData, n2, floodFillVisited, floodFillVisitColor, maxN2, (k == 0) ? extremeVertexSearchHint1 : extremeVertexSearchHint1_b); // O(logV)?
-					if (k == 0) extremeVertexSearchHint1 = extremeVertexSearchHint1_b = hint;
-					else extremeVertexSearchHint1_b = hint;
-
-					CLEAR_GRAPH_SEARCH();
-					hint = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, (k == 0) ? extremeVertexSearchHint2 : extremeVertexSearchHint2_b); // O(logV)?
-					if (k == 0) extremeVertexSearchHint2 = extremeVertexSearchHint2_b = hint;
-					else extremeVertexSearchHint2_b = hint;
-					minN2 = -minN2;
-
-					float maxN3 = dot(n3, hull.v[edges[edgeJ].first]);
-
-					float minN3 = FLT_MAX;
-					const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edgeJ];
-					if (antipodalsEdge3.size() < 20) // If there are very few antipodal vertices, do a very tight loop and just iterate over each.
-					{
-						for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
-							minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
-					}
-					else
-					{
-						// Otherwise perform a spatial locality exploiting graph search.
-						CLEAR_GRAPH_SEARCH();
-						hint = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, (k == 0) ? extremeVertexSearchHint3 : extremeVertexSearchHint3_b); // O(logV)?
-						if (k == 0) extremeVertexSearchHint3 = extremeVertexSearchHint3_b = hint;
-						else extremeVertexSearchHint3_b = hint;
-						minN3 = -minN3;
-					}
-
-					float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-					TestBox(hull.v, n, n2, volume, &minVolume, &minOBB);
+					n = Normalized(n);
+					searchAxis(n, dot(n, hull.v[edges[edge].first]), dot(n, hull.v[edges[i].first]), i);
 				}
 			}
 		}
@@ -1706,24 +1822,27 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		size_t i = spatialFaceOrder[ii];
 		vec3 n1 = faceNormals[i];
 
-		// Find two edges on the face. Since we have flexibility to choose from multiple edges of the same face,
-		// choose two that are possibly most opposing to each other, in the hope that their sets of sidepodal
-		// edges are most mutually exclusive as possible, speeding up the search below.
+		// The edges that are sidepodal to the face are the ones that are sidepodal to any of its edges, as far
+		// as the normal of the face goes: take the first edge of the face that has an arc of normals at all.
+		// A box that is flush with the face is flush with all the edges of the face, so the face is of no use
+		// if any of them is ruled out.
 		int e1 = -1;
+		bool ruledOut = false;
 		for(size_t j = 0; j < faceEdges[i].size(); ++j)
 		{
 			int e = faceEdges[i][j];
-			if (!IS_INTERNAL_EDGE(e))
-			{
+			if (IS_INTERNAL_EDGE(e))
+				continue;
+			if (e1 == -1)
 				e1 = e;
-				break;
-			}
+			ruledOut = ruledOut || minVolumeForEdge[e] >= minVolume;
 		}
 		if (e1 == -1)
 			continue; // All edges of this face were degenerate internal edges! Just skip processing the whole face.
+		if (ruledOut)
+			continue;
 
 		const std::vector<int> &antipodals = antipodalPointsForEdge[e1];
-		const std::vector<int> &compatibleEdgesI = compatibleEdges[e1];
 
 		float maxN1 = dot(n1, hull.v[edges[e1].first]);
 		float minN1;
@@ -1733,81 +1852,210 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			minN1 = FLT_MAX;
 			for(size_t j = 0; j < antipodals.size(); ++j)
 				minN1 = fminf(minN1, dot(n1, hull.v[antipodals[j]]));
-			if (maxN1 < minN1) std::swap(minN1, maxN1); // XXX Numerical stability hack
 		}
 		else
 		{
 			CLEAR_GRAPH_SEARCH();
+			int &extremeVertexSearchHint4 = extremeVertexSearchHint(-n1);
 			extremeVertexSearchHint4 = ExtremeVertexConvex(hull, adjacencyData, -n1, floodFillVisited, floodFillVisitColor, minN1, extremeVertexSearchHint4); // O(logV)?
 			minN1 = -minN1;
-			if (maxN1 < minN1) std::swap(minN1, maxN1); // XXX Numerical stability hack
 		}
+		if (maxN1 < minN1) std::swap(minN1, maxN1); // XXX Numerical stability hack
 
-		for(size_t j = 0; j < compatibleEdgesI.size(); ++j)
-		{
-			int edge3 = compatibleEdgesI[j];
-			// Test all mutual compatible edges.
-			vec3 f3a = faceNormals[facesForEdge[edge3].first];
-			vec3 f3b = faceNormals[facesForEdge[edge3].second];
-
-			// Is edge3 compatible with direction n?
-			// n3 = f3b + (f3a-f3b)*v
-			// n1.n3 = 0
-			// n1.(f3b + (f3a-f3b)*v) = 0
-			// n1.f3b + n1.((f3a-f3b)*v) = 0
-			// n1.f3b = (n1.(f3b-f3a))*v
-			// If n1.(f3b-f3a) != 0:
-			//    v = n1.f3b / n1.(f3b-f3a)
-			// If n1.(f3b-f3a) == 0:
-			//    n1.f3b must be zero as well, then arbitrary v is ok.
-			float num = dot(n1, f3b);
-			float denom = dot(n1, f3b-f3a);
-			float v;
-			if (!EqualAbs(denom, 0.f))
-				v = num / denom;
-			else
-				v = EqualAbs(num, 0.f) ? 0.f : -1.f;
-
-			const float epsilon = 1e-4f;
-			if (v >= 0.f - epsilon && v <= 1.f + epsilon)
-			{
-				vec3 n3 = Normalized(f3b + (f3a - f3b) * v);
-				vec3 n2 = Normalized(cross(n3, n1));
-
-				float minN2, maxN2;
-				CLEAR_GRAPH_SEARCH();
-				extremeVertexSearchHint1 = ExtremeVertexConvex(hull, adjacencyData, n2, floodFillVisited, floodFillVisitColor, maxN2, extremeVertexSearchHint1); // O(logV)?
-				CLEAR_GRAPH_SEARCH();
-				extremeVertexSearchHint2 = ExtremeVertexConvex(hull, adjacencyData, -n2, floodFillVisited, floodFillVisitColor, minN2, extremeVertexSearchHint2); // O(logV)?
-				minN2 = -minN2;
-				if (maxN2 < minN2) std::swap(minN2, maxN2); // XXX Numerical stability hack
-				float maxN3 = dot(n3, hull.v[edges[edge3].first]);
-
-				const std::vector<int> &antipodalsEdge3 = antipodalPointsForEdge[edge3];
-				float minN3 = FLT_MAX;
-				if (antipodalsEdge3.size() < 20) // If there are very few antipodal vertices, do a very tight loop and just iterate over each.
-				{
-					for(size_t a = 0; a < antipodalsEdge3.size(); ++a)
-						minN3 = fminf(minN3, dot(n3, hull.v[antipodalsEdge3[a]]));
-					if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
-				}
-				else
-				{
-					// Otherwise perform a spatial locality exploiting graph search.
-					CLEAR_GRAPH_SEARCH();
-					extremeVertexSearchHint3 = ExtremeVertexConvex(hull, adjacencyData, -n3, floodFillVisited, floodFillVisitColor, minN3, extremeVertexSearchHint3); // O(logV)?
-					minN3 = -minN3;
-					if (maxN3 < minN3) std::swap(minN3, maxN3); // XXX Numerical stability hack
-				}
-
-				float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-				TestBox(hull.v, n1, n2, volume, &minVolume, &minOBB);
-			}
-		}
+		searchAxis(n1, minN1, maxN1, e1);
 	}
 
 	TRACE_FMT(t0, "obb: category 3: same face (evc calls=%ld steps=%ld)",
 		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+	TRACE_EVC_RESET(evcCalls0, evcSteps0);
+
+	// Returns a lower bound for the width of the hull along the third axis of the boxes that have a face flush
+	// with edge i and another one flush with edge J. That axis is n1 x n2, for an n1 on the arc of edge i and
+	// an n2 on the arc of edge J. As a unit vector it is at most `turn` away from searchDir, the unit vector
+	// along the cross product of the middles of the two arcs, whose length is `len`. Any two vertices of the
+	// hull that are d apart are then at least d.searchDir (1 - turn^2/2) - turn |d - (d.searchDir) searchDir|
+	// apart along it: such as the given vertices, which are extreme vertices along searchDir and -searchDir,
+	// or at least along directions that are close to those.
+	auto thirdWidthBound = [&](size_t i, int edgeJ, const vec3 &searchDir, float len, int vertex1, int vertex2) -> double
+	{
+		const dvec3 d = dvec3(vtx[vertex1]) - dvec3(vtx[vertex2]);
+		const double w = dot(dvec3(searchDir), d);
+		const double turn = (double)arcChord[i] + arcChord[edgeJ] + (1.0 - len) + 1e-6;
+		return w * (1.0 - turn * turn * 0.5) - turn * sqrt(std::max(dot(d, d) - w * w, 0.0)) - widthMargin;
+	};
+
+	std::vector<vec3> thirdAxes;
+	const size_t maxEdgesToTryAll = 128;
+	// For each face, the last pair of edges (by a running number) for which the box was tested whose third face
+	// is flush with the face.
+	std::vector<size_t> faceTestedForPair(F, 0);
+	size_t pairNumber = 0;
+
+	// Category 1: all configurations where the OBB is flush with three edges on adjacent faces.
+	// This category takes the longest to search, and is therefore searched last: by now there is a box to beat,
+	// and a pair or a triplet of edges is skipped when the bounds for the widths of the hull along the normals
+	// of the edges show that no box that is flush with them can be smaller than that.
+	for(size_t ii = 0; ii < spatialEdgeOrder.size(); ++ii)
+	{
+		size_t i = (size_t)spatialEdgeOrder[ii];
+		// (The other two faces of the box are flush with an edge each as well.)
+		if (minVolumeForEdge[i] >= minVolume || (double)minWidth[i] * smallestMinWidth * smallestMinWidth >= minVolume) continue;
+		vec3 f1a = edgeNormalA[i];
+		vec3 f1b = edgeNormalB[i];
+		findSidepodalEdges(i);
+
+		for(size_t j = compatibleEdgesBegin[i]; j < compatibleEdgesEnd[i]; ++j) // O(sqrt(|E|))?
+		{
+			int edgeJ = compatibleEdges[j];
+			if (edgeJ <= (int)i) continue; // Remove symmetry.
+			const double pairWidth = (double)minWidth[i] * minWidth[edgeJ];
+			TRACE_INC(edgePairs);
+			if (minVolumeForEdge[edgeJ] >= minVolume || pairWidth * smallestMinWidth >= minVolume) continue;
+			vec3 f2a = edgeNormalA[edgeJ];
+			vec3 f2b = edgeNormalB[edgeJ];
+			if (AreEdgesBad(f1a, f1b, f2a, f2b)) continue;
+
+			vec3 searchDir = cross(arcMiddle[i], arcMiddle[edgeJ]);
+			const float len = Normalize(searchDir);
+			if (len == 0.f)
+			{
+				searchDir = cross(f1a, f2a);
+				if (Normalize(searchDir) == 0.f)
+					searchDir = Perpendicular(f1a);
+			}
+
+			// Often the vertices that the searches for the extreme vertices would start from are enough to tell
+			// that these two edges are of no use.
+			// (When the two arcs together are longer than about 60 degrees, the bound says nothing.)
+			const bool boundThirdWidth = len > 0.f && arcChord[i] + arcChord[edgeJ] < 0.5f;
+			if (boundThirdWidth && pairWidth * thirdWidthBound(i, edgeJ, searchDir, len, extremeVertexSearchHint(searchDir), extremeVertexSearchHint(-searchDir)) >= minVolume)
+				continue;
+
+			// Tests the box that has its faces flush with the edges i, J and K, if there is one. Returns whether
+			// the third axis of any box that is flush with the edges i and J can be on the arc of edge K at all.
+			const float axisDot = dot(arcAxis[i], arcAxis[edgeJ]);
+			const float axisTolerance = 1e-5f;
+			++pairNumber;
+			auto testThirdEdge = [&](int edgeK) -> bool
+			{
+				const vec3 &f3a = edgeNormalA[edgeK];
+				const vec3 &f3b = edgeNormalB[edgeK];
+				TRACE_INC(thirdEdgesTested);
+				float range[2];
+				if (!CanBeThirdAxis(f1a, f1b, arcAxis[i], f2a, f2b, arcAxis[edgeJ], axisDot, axisTolerance, f3a, f3b, arcLengthSq[edgeK], range))
+					return false;
+
+				// If the third axis is at an end of the arc, it is the normal of a face of the hull, and all the
+				// edges of that face give the same box: one of them is enough.
+				if (range[1] < 1e-3f || range[0] > 1.f - 1e-3f)
+				{
+					const int face = range[1] < 1e-3f ? facesForEdge[edgeK].second : facesForEdge[edgeK].first;
+					if (faceTestedForPair[face] == pairNumber)
+						return true;
+					if (edgeJ < edgeK)
+						faceTestedForPair[face] = pairNumber;
+				}
+
+				// Test edge triplet i, edgeJ, edgeK.
+				if (edgeJ < edgeK && pairWidth * minWidth[edgeK] < minVolume && minVolumeForEdge[edgeK] < minVolume
+					&& !AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
+				{
+					vec3 n1[2], n2[2], n3[2];
+					TRACE_INC(edgeTriplets);
+					int nSolutions = ComputeBasis(f1a, f1b, f2a, f2b, f3a, f3b, n1, n2, n3);
+					for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
+					{
+						TRACE_INC(edgeTripletsSolved);
+						TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
+							edges, antipodalPointsForEdge, &minVolume, &minOBB);
+					}
+				}
+				return true;
+			};
+
+			// The third edge is sidepodal to edge i as well. If edge i has only few sidepodal edges, it is the
+			// fastest to simply try them all. Most of them are ruled out by where their arc is. The third axis is
+			// within `turn` of searchDir or its opposite (see thirdWidthBound(); the 2e-3 is for the tolerances of
+			// ComputeBasis()), so the middle of the arc has to be within that plus the distance to its ends. And
+			// the third axis is perpendicular to a normal on each of the two arcs, so its dot product with the
+			// middle of an arc is at most the distance from there to the ends of that arc: the arc of the third
+			// edge must have such a normal, which is tested for the shorter one of the two arcs.
+			if (compatibleEdgesEnd[i] - compatibleEdgesBegin[i] <= maxEdgesToTryAll)
+			{
+				TRACE_INC(edgePairsSearched);
+				const float turn = len > 0.f ? arcChord[i] + arcChord[edgeJ] + (1.f - len) + 2e-3f : 2.f;
+				const size_t shorter = arcChord[i] <= arcChord[edgeJ] ? i : (size_t)edgeJ;
+				const float tilt = arcChord[shorter] + 2e-3f;
+				for(size_t k = compatibleEdgesBegin[i]; k < compatibleEdgesEnd[i]; ++k)
+				{
+					const int edgeK = compatibleEdges[k];
+					const float reach = turn + arcChord[edgeK];
+					if (edgeK <= edgeJ || pairWidth * minWidth[edgeK] >= minVolume || fabsf(dot(arcMiddle[edgeK], searchDir)) < 1.f - 0.5f * reach * reach)
+						continue;
+					const float a = dot(arcMiddle[shorter], edgeNormalA[edgeK]), b = dot(arcMiddle[shorter], edgeNormalB[edgeK]);
+					if (fminf(a, b) <= tilt && fmaxf(a, b) >= -tilt)
+						testThirdEdge(edgeK);
+				}
+				continue;
+			}
+
+			// Otherwise find the extreme vertices of the hull along the third axis of a box that is flush with the
+			// two edges, of each family of such boxes. They also tell the best if the two edges are of any use.
+			// (The third axis of the first box points the same way as searchDir, except perhaps on arcs that are
+			// too long for the bound to say anything.)
+			thirdAxes.clear();
+			ThirdAxesOfBoxes(f1a, f1b, f2a, f2b, thirdAxes);
+			if (thirdAxes.empty())
+				thirdAxes.push_back(searchDir);
+			for(size_t k = 0; k < thirdAxes.size(); ++k)
+				for(int side = 0; side < 2; ++side)
+				{
+					const vec3 direction = side == 0 ? thirdAxes[k] : -thirdAxes[k];
+					int &hint = extremeVertexSearchHint(direction);
+					float dummy;
+					CLEAR_GRAPH_SEARCH();
+					hint = ExtremeVertexConvex(hull, adjacencyData, direction, floodFillVisited, floodFillVisitColor, dummy, hint); // O(log|V|)?
+					traverseStack.push_back(hint);
+				}
+			if (boundThirdWidth)
+			{
+				extremeVertexSearchHint(searchDir) = traverseStack[0];
+				extremeVertexSearchHint(-searchDir) = traverseStack[1];
+				if (pairWidth * thirdWidthBound(i, edgeJ, searchDir, len, traverseStack[0], traverseStack[1]) >= minVolume)
+				{
+					traverseStack.clear();
+					continue;
+				}
+			}
+			TRACE_INC(edgePairsSearched);
+
+			// Find the edges that the third face of the box can be flush with. Along a family of boxes, the third
+			// axis of the box moves over the normals of the hull: over the normals that a face can have when it
+			// touches the hull at a vertex, and from one vertex to a neighbor over the arc of normals of the edge
+			// between them, which is then such a third edge. So the search goes from the extreme vertices of a
+			// box of each family over those edges to their other vertices. (An edge is looked at only from the
+			// first of its vertices that the search comes to.)
+			CLEAR_GRAPH_SEARCH();
+			while(!traverseStack.empty())
+			{
+				int v = traverseStack.back();
+				traverseStack.pop_back();
+				if (HAVE_VISITED_VERTEX(v))
+					continue;
+				MARK_VERTEX_VISITED(v);
+				const std::vector<int> &n = adjacencyData[v];
+				for(size_t k = 0; k < n.size(); ++k)
+					// Edges inside faces with 180 degrees dihedral angles can be ignored.
+					if (!HAVE_VISITED_VERTEX(n[k]) && !IS_INTERNAL_EDGE(adjacentEdges[v][k]) && testThirdEdge(adjacentEdges[v][k]))
+						traverseStack.push_back(n[k]);
+			}
+		}
+	}
+
+	TRACE_FMT(t0, "obb: category 1: 3 adjacent faces (evc calls=%ld steps=%ld)",
+		TRACE_EVC_CALL_DELTA(evcCalls0), TRACE_EVC_STEP_DELTA(evcSteps0));
+	TRACE_FMT(t0, "obb: (pairs=%ld searched=%ld edges tested=%ld triplets=%ld solutions=%ld; sidepodal searches=%ld of %d)",
+		edgePairs, edgePairsSearched, thirdEdgesTested, edgeTriplets, edgeTripletsSolved, sidepodalSearches, E);
 
 	// The search for edge triplets does not follow cross-product orientation, so
 	// fix that up at the very last step, if necessary.
@@ -1928,15 +2176,6 @@ OBB minobb(const Hull3 &hull)
 		o.r = vec3(diameter * 0.5f, 0.f, 0.f);
 		return o;
 	}
-
-	// The search keeps a table of one bit for each vertex of each edge of the hull. Give up on a hull for
-	// which that table alone would take more than 4 GB: such a hull has tens of thousands of vertices, and
-	// the search would take hours on it in any case.
-	size_t numEdges = 0;
-	for (size_t i = 0; i < hull.f.size(); ++i)
-		numEdges += hull.f[i].size() / 2;
-	if ((double)numEdges * n > 8.0 * 4e9)
-		return degenerate;
 
 	// The search works in single precision and with absolute tolerances. To make it independent of where
 	// the input is and how large it is, it is run on a copy of the hull that is centered at the origin

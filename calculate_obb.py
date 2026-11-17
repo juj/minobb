@@ -78,9 +78,8 @@ def compute_one(glb_path: str, timeout: float):
             total = float(t.get("hull_sec", 0.0)) + float(t.get("obb_sec", 0.0))
         except (OSError, ValueError, TypeError) as e:
             return (glb_path, f"error (bad json: {e})", None)
-        # minobb() gives up on hulls whose search tables would not fit in memory.
         if data.get("obb", {}).get("degenerate") and data.get("hull", {}).get("vertices"):
-            return (glb_path, "no obb (too large)", total)
+            return (glb_path, "error (no obb)", total)
         return (glb_path, "ok", total)
     except subprocess.TimeoutExpired:
 #        print(f'TIMEOUT, DELETING {glb_path}')
@@ -92,8 +91,8 @@ def compute_one(glb_path: str, timeout: float):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--timeout", type=float, default=300.0,
-                    help="per-file timeout in seconds (default: 300)")
+    ap.add_argument("--timeout", type=float, default=3600.0,
+                    help="per-file timeout in seconds (default: 3600; the largest hulls take several minutes)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4,
                     help="parallel worker count (default: cpu count)")
     args = ap.parse_args()

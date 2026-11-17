@@ -30,7 +30,7 @@ GLBTEST_DIR = os.path.join(TMP_DIR, "glbtest")
 
 CXX = shutil.which("clang++") or "clang++"
 REL_TOL = 1e-6          # volumes round-trip through JSON with 9 significant digits
-TIMEOUT = 300.0         # per-GLB timeout in seconds
+TIMEOUT = 3600.0        # per-GLB timeout in seconds (the largest hulls take several minutes)
 
 
 def build_exe():

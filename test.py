@@ -115,7 +115,7 @@ def t_glb():
     if not os.path.exists(script):
         record("glb", False, "test_glb.py not found", 0.0)
         return
-    rc, out, dur = run([sys.executable, script], timeout=3600)
+    rc, out, dur = run([sys.executable, script], timeout=7200)
     m = re.search(r"(\d+)/(\d+) GLBs passed", out)
     ok = rc == 0 and "FAILED" not in out
     record("glb", ok, m.group(0) if m else ("ok" if ok else "see output"), dur)

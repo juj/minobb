@@ -20,8 +20,8 @@ OUT_FILE = "glb.html"
 def load_entry(p: str):
     """What the sibling .json of a .glb says about it, or None if the .json is
     missing or has no timing info: the number of input points and of hull
-    vertices, the hull and OBB times in seconds (no OBB time if minobb() gave
-    up on the hull as too large), and whether the hull is flat."""
+    vertices, the hull and OBB times in seconds (no OBB time if minobb()
+    returned no box), and whether the hull is flat."""
     path = os.path.splitext(p)[0] + ".json"
     if not os.path.exists(path):
         return None
@@ -82,7 +82,7 @@ def main() -> None:
             no_box.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(name)}</a>'
                           f' ({e["hull"]:,} hull vertices)')
         flat = ' <span class="dim">flat</span>' if e["flat"] else ""
-        obb = '<td class="dim">none: too large</td>' if e["obb_sec"] is None \
+        obb = '<td class="dim">none</td>' if e["obb_sec"] is None \
             else f'<td>{format_time(e["obb_sec"])}</td>'
         table.append(f'    <tr data-i="{len(data)}">{link}<td>{e["points"]:,}</td><td>{e["hull"]:,}{flat}</td>'
                      f'<td>{format_time(e["hull_sec"])}</td>{obb}</tr>')
@@ -99,8 +99,8 @@ def main() -> None:
                   'flat hull (planar or collinear input)</span></div>')
     note = "<div></div>"
     if no_box:
-        note = (f'<p class="note">Not shown: {len(no_box)} file{"s" if len(no_box) > 1 else ""} with a hull over the'
-                f' size limit of minobb(), which returned no box: {", ".join(no_box)}.</p>')
+        note = (f'<p class="note">Not shown: {len(no_box)} file{"s" if len(no_box) > 1 else ""} for which minobb()'
+                f' returned no box: {", ".join(no_box)}.</p>')
 
     values = {
         "COUNT": str(len(files)),
@@ -440,7 +440,7 @@ PAGE = r"""<!DOCTYPE html>
       pair('input vertices', fullCount(r[POINTS]));
       pair('hull vertices', fullCount(r[HULL]) + (r[FLAT] ? ' (flat hull)' : ''));
       if (spec.y !== HULL_SEC) pair('hull time', fullTime(r[HULL_SEC]));
-      if (spec.y !== OBB_SEC) pair('OBB time', r[OBB_SEC] === null ? 'none: hull too large' : fullTime(r[OBB_SEC]));
+      if (spec.y !== OBB_SEC) pair('OBB time', r[OBB_SEC] === null ? 'none' : fullTime(r[OBB_SEC]));
       add(tip, 'div', '', r[NAME]);
       add(tip, 'div', 'hint', 'click to open in the viewer');
       let x = p[0] + 14, y = p[1] + 14;

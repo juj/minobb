@@ -224,8 +224,8 @@ int main(int argc, char **argv)
 	print_aabb("aabb_vertices", aabb_v_min, aabb_v_max);
 	print_aabb("aabb_hull", aabb_h_min, aabb_h_max);
 
-	// A degenerate box (no points, or a hull too large for minobb()) has
-	// nothing else to print: its size and volume are not valid JSON numbers.
+	// A degenerate box (minobb() returned none) has nothing else to print:
+	// its size and volume are not valid JSON numbers.
 	printf("  \"obb\": {\n");
 	if (obb.IsDegenerate())
 		printf("    \"degenerate\": true\n");
