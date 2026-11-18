@@ -1,4 +1,4 @@
-# minobb
+# Minobb
 
 ![A model with its convex hull (blue), its minimum volume OBB (orange) and its axis-aligned bounding box (purple)](screenshot.png)
 
@@ -6,7 +6,7 @@
 
 This repository contains embeddable C++ library code for calculating the minimum enclosing oriented bounding box (OBB) by volume for 3D polyhedra.
 
-# Try it Live
+# Try It Live
 
 To try out the calculator on a given GLTF/GLB file, open the [online viewer](https://juj.github.io/minobb/site/view.html), and then drag-n-drop your GLTF file to it. The page will then compute the minimum volume OBB for you.
 
