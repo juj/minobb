@@ -21,6 +21,9 @@
   #hud label.disabled { opacity: 0.4; cursor: default; }
   #hud input { vertical-align: middle; }
   #hud hr { border: none; border-top: 1px solid #888; margin: 6px 0; }
+  /* (The citation wraps to the width that the rest of the panel has, instead of widening it.) */
+  #citation { width: 0; min-width: 100%; }
+  #citation a { color: inherit; }
   .panel button, .panel input[type=number] { font: inherit; }
   .panel button { cursor: pointer; }
   .dim { opacity: 0.7; }
@@ -93,6 +96,8 @@
   <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB (purple)</label>
   <hr>
   <label id="lbl-dark"><input type="checkbox" id="cb-dark" checked> Dark Mode</label>
+  <hr>
+  <div id="citation">Based on <a href="minobb_jylanki_2015_06_01.pdf">J. Jylänki: <i>An Exact Algorithm for Finding Minimum Oriented Bounding Boxes</i> (2015)</a></div>
 </div>
 <details id="jsonpanel" class="panel" open hidden>
   <summary>Bounding boxes (JSON)</summary>
