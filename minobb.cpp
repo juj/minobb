@@ -1783,7 +1783,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 
 		// The box to start with: the middle of the arc, and the two samples that make the smallest face.
 		// Measured with the vertices of the hints, the box comes out no larger than it is. If it can still be
-		// the best box, its widths are measured with the vertices that a climb from those ends at.
+		// the best box, its widths are measured with the extreme vertices, searched for from those. (Not with
+		// a plain climb, which stops where vertices tie. The mesh of a body of revolution has a seam of such
+		// vertices, in pairs that are some 1e-17 apart: a climb that ends on it makes the box come out smaller
+		// than it is, for edge after edge, and TestBox() then measures each such box over all the vertices.)
 		int best = 0;
 		double bestArea = DBL_MAX;
 		for (int k = 0; k < numSamples / 2; ++k)
@@ -1812,8 +1815,11 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				const int k = best + a * numSamples / 2;
 				axis[a] = basisU * (float)plane.cosine[k * step] + basisV * (float)plane.sine[k * step];
 				int &hint1 = extremeVertexSearchHint(axis[a]), &hint2 = extremeVertexSearchHint(-axis[a]);
-				hint1 = ClimbAlong(vtx, adjacencyData, axis[a], farVertex[k]);
-				hint2 = ClimbAlong(vtx, adjacencyData, -axis[a], farVertex[k + numSamples]);
+				float dummy;
+				CLEAR_GRAPH_SEARCH();
+				hint1 = ExtremeVertexConvex(hull, adjacencyData, axis[a], floodFillVisited, floodFillVisitColor, dummy, farVertex[k]);
+				CLEAR_GRAPH_SEARCH();
+				hint2 = ExtremeVertexConvex(hull, adjacencyData, -axis[a], floodFillVisited, floodFillVisitColor, dummy, farVertex[k + numSamples]);
 				faceWidth[a] = dot(dvec3(axis[a]), dvec3(vtx[hint1]) - dvec3(vtx[hint2]));
 			}
 			TestBox(vtx, arcMiddle[e], axis[0], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
