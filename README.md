@@ -130,3 +130,7 @@ python build_index.py            # writes site/glb.html and site/results.html
 ```
 
 To browse downloaded models with their computed hulls and boxes, serve the repository root with `python -m http.server` and open `http://localhost:8000/site/glb.html`.
+
+# Extras
+
+In addition to calculating minimum OBBs, this repository contains two other bonus features: calculating convex hulls (convex_hull.h/.cpp), and calculating minimum enclosing spheres (minsphere.h/.cpp).
