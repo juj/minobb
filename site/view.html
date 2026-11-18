@@ -2,16 +2,18 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>GLB viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minobb viewer: minimum bounding box calculator</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #202020; }
   #app { width: 100%; height: 100%; display: block; }
-  #hud {
-    position: absolute; top: 8px; left: 8px; z-index: 10;
+  .panel {
+    position: absolute; z-index: 10;
     font: 13px/1.5 monospace; color: #ddd;
     background: rgba(0,0,0,0.55); padding: 6px 10px; border-radius: 4px;
   }
-  #hudtext { white-space: pre; }
+  #hud { top: 8px; left: 8px; max-width: calc(100vw - 36px); }
+  #hudtext { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
   #hud label {
     display: block; margin-top: 4px; cursor: pointer;
     user-select: none; white-space: pre;
@@ -19,9 +21,54 @@
   #hud label.disabled { opacity: 0.4; cursor: default; }
   #hud input { vertical-align: middle; }
   #hud hr { border: none; border-top: 1px solid #888; margin: 6px 0; }
+  .panel button, .panel input[type=number] { font: inherit; }
+  .panel button { cursor: pointer; }
+  .dim { opacity: 0.7; }
+  #tolerance { width: 7em; }
+  #tolerance.invalid { outline: 2px solid #e05050; }
+
+  /* The results as JSON, with the button that copies them. */
+  #jsonpanel { top: 8px; right: 8px; width: min(450px, calc(100vw - 36px)); }
+  #jsonpanel summary { cursor: pointer; user-select: none; }
+  #jsontext {
+    display: block; box-sizing: border-box; margin: 6px 0;
+    width: 100%; height: min(34em, 60vh); resize: vertical;
+    font: 12px/1.4 monospace; white-space: pre; tab-size: 2;
+    color: inherit; background: rgba(0,0,0,0.35); border: 1px solid #666; border-radius: 3px;
+  }
+  #jsonpanel label { cursor: pointer; user-select: none; margin-left: 10px; }
+  #jsonpanel input { vertical-align: middle; }
+  #copied { display: block; min-height: 1.5em; }
+  @media (max-width: 760px) { /* A narrow window: the JSON goes to the bottom, out of the way of the other panel. */
+    #jsonpanel { top: auto; bottom: 8px; left: 8px; right: 8px; width: auto; }
+    #jsontext { height: 22vh; }
+  }
+
+  /* What an empty page says, and the frame that shows while files are dragged over the page. */
+  #prompt {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 5;
+    width: min(34em, calc(100vw - 48px)); text-align: center;
+    font: 14px/1.6 sans-serif; color: #ccc;
+    border: 2px dashed #777; border-radius: 12px; padding: 22px 26px;
+  }
+  #prompt .big { font-size: 22px; color: #eee; margin-bottom: 6px; }
+  #prompt button { font: inherit; padding: 4px 14px; margin: 10px 0; cursor: pointer; }
+  #prompt a { color: inherit; }
+  #dropframe {
+    position: absolute; inset: 8px; z-index: 20; display: none; pointer-events: none;
+    border: 3px dashed #ff8800; border-radius: 12px; background: rgba(255,136,0,0.12);
+    align-items: center; justify-content: center;
+    font: 24px sans-serif; color: #fff; text-shadow: 0 1px 4px #000;
+  }
+  body.dragging #dropframe { display: flex; }
+  [hidden] { display: none !important; }
+
   body.light { background: #d0d0d0; }
-  body.light #hud { background: rgba(255,255,255,0.75); color: #222; }
+  body.light .panel { background: rgba(255,255,255,0.75); color: #222; }
   body.light #hud hr { border-top-color: #999; }
+  body.light #jsontext { background: rgba(255,255,255,0.6); border-color: #999; }
+  body.light #prompt { color: #333; border-color: #888; }
+  body.light #prompt .big { color: #111; }
 </style>
 <script type="importmap">
 {
@@ -33,8 +80,12 @@
 </script>
 </head>
 <body>
-<div id="hud">
+<div id="hud" class="panel">
   <div id="hudtext">loading...</div>
+  <hr>
+  <div><button id="open" type="button">Open model...</button> <span class="dim">or drop a .glb / .gltf on the page</span></div>
+  <label id="lbl-tolerance" title="How much larger than the minimum volume the OBB may be, as a fraction of the volume: 0.0015 is 0.15 %. With 0 the box is the minimum one, which can take minutes to find for a finely tessellated round shape.">OBB tolerance <input type="number" id="tolerance" min="0" step="0.0005" value="0.0015"> <span class="dim">(0 = exact)</span></label>
+  <hr>
   <label id="lbl-object"><input type="checkbox" id="cb-object" checked> Show object</label>
   <label id="lbl-hull" style='display:none'><input type="checkbox" id="cb-hull" checked> Show Convex Hull (white)</label>
   <label id="lbl-hulltri"><input type="checkbox" id="cb-hulltri"> Show hull triangles (blue)</label>
@@ -43,11 +94,37 @@
   <hr>
   <label id="lbl-dark"><input type="checkbox" id="cb-dark" checked> Dark Mode</label>
 </div>
+<details id="jsonpanel" class="panel" open hidden>
+  <summary>Bounding boxes (JSON)</summary>
+  <textarea id="jsontext" readonly spellcheck="false" wrap="off" aria-label="The bounding boxes of the model as JSON"></textarea>
+  <button id="copy" type="button">Copy JSON</button><label title="Adds the vertices and the faces of the convex hull to the JSON."><input type="checkbox" id="cb-jsonhull"> with the convex hull</label><span id="copied" class="dim" role="status"></span>
+</details>
+<div id="prompt" hidden>
+  <div class="big">Drop a glTF model here</div>
+  <div>A <b>.glb</b> file, or a <b>.gltf</b> file together with its .bin and texture files (or the folder that has them).</div>
+  <button id="choose" type="button">Choose files...</button>
+  <div class="dim">The page computes the convex hull of the model, its minimum volume oriented bounding box (OBB) and its axis-aligned bounding box (AABB) with <a href="https://github.com/juj/minobb">minobb</a>. The calculation runs in your browser: the model is not uploaded anywhere.</div>
+</div>
+<div id="dropframe">Drop the model to compute its bounding boxes</div>
+<input type="file" id="file" multiple hidden accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2">
 <canvas id="app"></canvas>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// The page shows one model, with its convex hull, its minimum volume OBB and its AABB drawn over it, and
+// the numbers of these as JSON. The model comes from one of two places:
+//
+// - view.html?url=<model.glb> loads the model of the URL. If there is a <model>.json next to it (the output
+//   of the command line tool minobb_glb, see calculate_obb.py), the hull and the boxes are taken from it.
+// - Files that are dropped on the page (or chosen with the button) are read right where they are.
+//
+// Without a .json, the hull and the boxes are computed in the browser by calculator.js, which
+// build_viewer.py compiles from minobb.cpp and convex_hull.cpp.
 
 const params = new URLSearchParams(location.search);
 const url = params.get('url');
@@ -64,6 +141,9 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(devicePixelRatio);
 
 const controls = new OrbitControls(camera, renderer.domElement);
+// True once the user has moved the camera of the current model: after that the page leaves the camera alone.
+let cameraMoved = false;
+controls.addEventListener('start', () => { cameraMoved = true; });
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const dir = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -75,6 +155,37 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
+
+// The decoders of compressed models (Draco and meshopt geometry, KTX2 textures). Each fetches its code only
+// when a model needs it.
+const ADDONS_URL = 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/';
+const dracoLoader = new DRACOLoader().setDecoderPath(ADDONS_URL + 'libs/draco/gltf/');
+const ktx2Loader = new KTX2Loader().setTranscoderPath(ADDONS_URL + 'libs/basis/').detectSupport(renderer);
+
+function newGLTFLoader(manager) {
+  ktx2Loader.manager = manager; // (So that the textures of dropped files are found, see loadFiles().)
+  const loader = new GLTFLoader(manager)
+    .setDRACOLoader(dracoLoader)
+    .setKTX2Loader(ktx2Loader)
+    .setMeshoptDecoder(MeshoptDecoder);
+  // (A plugin that does nothing, but gets to see the parser of the model: see runLoader().)
+  loader.register((parser) => { loader.parserOfModel = parser; return { name: 'minobb_viewer' }; });
+  return loader;
+}
+
+// Loads a model with start(loader), which returns the Promise of a GLTFLoader. A model that needs a glTF
+// extension that the loader does not know fails in ways that say nothing of it: this says it.
+async function runLoader(loader, start) {
+  try {
+    return await start(loader);
+  } catch (e) {
+    const parser = loader.parserOfModel;
+    const unknown = parser ? (parser.json.extensionsRequired || []).filter(name => !parser.extensions[name]) : [];
+    if (!unknown.length) throw e;
+    throw new Error((e && e.message || e) + '\nthe model requires the glTF extension' + (unknown.length > 1 ? 's ' : ' ') +
+      unknown.join(', ') + ', which this viewer does not support');
+  }
+}
 
 // Points the camera at the object, and at the given box as well (that of the overlays), if any.
 function fitCamera(object, overlayBox) {
@@ -215,6 +326,13 @@ function formatVolume(v) {
   return mantissa.toFixed(3) + 'e' + exponent;
 }
 
+// A time in seconds as text, like 1.23 s, 45.6 ms or 789 µs.
+function formatTime(seconds) {
+  for (const [scale, unit] of [[1, 's'], [1e-3, 'ms'], [1e-6, 'µs']])
+    if (seconds >= scale) return +(seconds / scale).toPrecision(3) + ' ' + unit;
+  return seconds > 0 ? '< 1 µs' : '0 s';
+}
+
 // Exact volume of a closed polyhedron (divergence theorem):
 // V = |sum over fan triangles of det[a b c]| / 6 (n-gon faces are
 // fan-triangulated from their first vertex).
@@ -232,8 +350,19 @@ function polyhedronVolume(vertices, faces) {
   return Math.abs(vol) / 6;
 }
 
-// Overlay groups, toggled by the checkboxes in the HUD panel.
-let hullGroup = null, hullTriLines = null, obbGroup = null, aabbGroups = [];
+// The volume of the hull of the JSON. (A flat hull is not a closed polyhedron: its volume is 0.)
+function hullVolume(hull) {
+  return hull.degenerate ? 0 : polyhedronVolume(hull.vertices, hull.faces);
+}
+
+// What the page shows: the model (the name of its file, what the HUD panel calls it, and its three.js
+// scene), and the hull and the boxes of the model (the data of minobb_glb's JSON, with where it came from).
+// Either can be missing.
+let model = null;  // { name, label, object }
+let result = null; // { data, source }
+
+// Overlay groups, toggled by the checkboxes in the HUD panel. They live in overlayRoot.
+let overlayRoot = null, hullGroup = null, hullTriLines = null, obbGroup = null, aabbGroups = [];
 
 const cbObject = document.getElementById('cb-object');
 const cbHull = document.getElementById('cb-hull');
@@ -241,9 +370,13 @@ const cbHullTri = document.getElementById('cb-hulltri');
 const cbOBB = document.getElementById('cb-obb');
 const cbAABB = document.getElementById('cb-aabb');
 const cbDark = document.getElementById('cb-dark');
-
-// The loaded GLB scene root, toggled by the "Show object" checkbox.
-let modelObj = null;
+const cbJsonHull = document.getElementById('cb-jsonhull');
+const toleranceInput = document.getElementById('tolerance');
+const jsonPanel = document.getElementById('jsonpanel');
+const jsonText = document.getElementById('jsontext');
+const copiedText = document.getElementById('copied');
+const promptBox = document.getElementById('prompt');
+const fileInput = document.getElementById('file');
 
 // Checkbox state persists across pages via localStorage.
 const PREFS_KEY = 'minobb_view_overlays';
@@ -253,7 +386,7 @@ function savePrefs() {
       object: cbObject.checked,
       hull: cbHull.checked, hulltri: cbHullTri.checked,
       obb: cbOBB.checked, aabb: cbAABB.checked,
-      dark: cbDark.checked
+      dark: cbDark.checked, jsonhull: cbJsonHull.checked
     }));
   } catch (e) { /* storage unavailable (private mode etc.): ignore */ }
 }
@@ -265,6 +398,7 @@ try {
   if (typeof prefs.obb === 'boolean') cbOBB.checked = prefs.obb;
   if (typeof prefs.aabb === 'boolean') cbAABB.checked = prefs.aabb;
   if (typeof prefs.dark === 'boolean') cbDark.checked = prefs.dark;
+  if (typeof prefs.jsonhull === 'boolean') cbJsonHull.checked = prefs.jsonhull;
 } catch (e) { /* corrupted/absent prefs: keep defaults */ }
 
 // Dark / light theme: page + HUD colors via a body class, and the three.js
@@ -277,7 +411,7 @@ function applyTheme() {
 applyTheme();
 cbDark.addEventListener('change', () => { applyTheme(); savePrefs(); });
 
-cbObject.addEventListener('change', () => { if (modelObj) modelObj.visible = cbObject.checked; savePrefs(); });
+cbObject.addEventListener('change', () => { if (model) model.object.visible = cbObject.checked; savePrefs(); });
 cbHull.addEventListener('change', () => { if (hullGroup) hullGroup.visible = cbHull.checked; savePrefs(); });
 cbHullTri.addEventListener('change', () => { if (hullTriLines) hullTriLines.visible = cbHullTri.checked; savePrefs(); });
 cbOBB.addEventListener('change', () => { if (obbGroup) obbGroup.visible = cbOBB.checked; savePrefs(); });
@@ -285,131 +419,613 @@ cbAABB.addEventListener('change', () => {
   for (const g of aabbGroups) g.visible = cbAABB.checked;
   savePrefs();
 });
-// Disables a checkbox when its overlay does not exist in the JSON.
+// Disables a checkbox when the thing that it shows does not exist.
 function bindCheckbox(cb, label, groupExists) {
   cb.disabled = !groupExists;
   label.classList.toggle('disabled', !groupExists);
 }
-
-function fail(msg) {
-  hudText.textContent = msg;
-  bindCheckbox(cbObject, document.getElementById('lbl-object'), false);
-  bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
-  bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
-  bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
-  bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
+function bindCheckboxes() {
+  bindCheckbox(cbObject, document.getElementById('lbl-object'), !!model);
+  bindCheckbox(cbHull, document.getElementById('lbl-hull'), !!hullGroup);
+  bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), !!hullTriLines);
+  bindCheckbox(cbOBB, document.getElementById('lbl-obb'), !!obbGroup);
+  bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), aabbGroups.length > 0);
 }
 
-if (!url) {
-  fail('no ?url= query parameter.\nusage: view.html?url=../test/glb/.../foo.glb');
-} else {
-  hudText.textContent = 'loading ' + url + ' ...';
-  new GLTFLoader().load(
-    url,
-    async (gltf) => {
-      const model = gltf.scene;
-      scene.add(model);
-      modelObj = model;
-      model.visible = cbObject.checked;
-
-      // minobb_glb computes the hull/OBB in scene (world) space over all
-      // meshes, so the overlays are added to the scene root.
-      let overlays = 'none (no sibling .json)';
-      let overlayBox = null; // The box of all the points that the hull and the boxes were computed from.
-      const jsonUrl = url.replace(/\.glb$/i, '.json');
-      try {
-        const resp = await fetch(jsonUrl);
-        if (resp.ok) {
-          const data = await resp.json();
-          // The overlays live in a sibling group, NOT under the model: three.js
-          // inherits a parent's invisibility to its whole subtree, so parenting
-          // them to the model would make "Show object" hide them as well. The
-          // JSON coordinates are in world space, and gltf.scene sits at the scene
-          // root with an identity transform, so scene-space == model-root-space.
-          const parent = new THREE.Group();
-          scene.add(parent);
-          if (data.hull && data.hull.vertices && data.hull.vertices.length &&
-              data.hull.faces && data.hull.faces.length) {
-            hullGroup = drawHull(data.hull);
-            hullGroup.visible = cbHull.checked;
-            parent.add(hullGroup);
-            hullTriLines = drawHullTriangles(data.hull);
-            hullTriLines.visible = cbHullTri.checked;
-            parent.add(hullTriLines);
-          }
-          let obbOk = false;
-          // Note: h >= 0, not h > 0 — a valid OBB of a planar (or collinear)
-          // point set has zero extent along one (or two) axes; only the
-          // C++ degenerate sentinel (negative extents) is rejected, via
-          // !data.obb.degenerate.
-          if (data.obb && !data.obb.degenerate &&
-              data.obb.half_extents.every(h => h >= 0)) {
-            obbGroup = drawOBB(data.obb);
-            obbGroup.visible = cbOBB.checked;
-            parent.add(obbGroup);
-            obbOk = true;
-          }
-          if (data.aabb_vertices) {
-            overlayBox = new THREE.Box3(new THREE.Vector3(...data.aabb_vertices.min), new THREE.Vector3(...data.aabb_vertices.max));
-            const g = drawAABB({ ...data.aabb_vertices, color: 0x44ff44 }); // green: all vertices
-            g.visible = cbAABB.checked;
-            parent.add(g);
-            aabbGroups.push(g);
-          }
-          if (data.aabb_hull) {
-            const g = drawAABB({ ...data.aabb_hull, color: 0xff44ff });     // magenta: hull vertices
-            g.visible = cbAABB.checked;
-            parent.add(g);
-            aabbGroups.push(g);
-          }
-          bindCheckbox(cbHull, document.getElementById('lbl-hull'), !!hullGroup);
-          bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), !!hullTriLines);
-          bindCheckbox(cbOBB, document.getElementById('lbl-obb'), !!obbGroup);
-          bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), aabbGroups.length > 0);
-
-          let stats = `hull: ${data.hull ? data.hull.vertices.length + 'v / ' + data.hull.faces.length + 'f' : '-'}  ` +
-                      (obbOk ? 'obb: yes' : 'obb: no');
-          const vols = [];
-          if (data.hull && data.hull.vertices && data.hull.faces)
-            vols.push(['convex hull', polyhedronVolume(data.hull.vertices, data.hull.faces)]);
-          if (data.aabb_vertices)
-            vols.push(['aabb (vertices)', data.aabb_vertices.volume]);
-          if (data.aabb_hull)
-            vols.push(['aabb (hull)', data.aabb_hull.volume]);
-          if (data.obb && data.obb.volume !== undefined)
-            vols.push(['obb', data.obb.volume]);
-          if (vols.length) {
-            stats += '\nvolume:';
-            for (const [name, v] of vols)
-              stats += '\n  ' + name.padEnd(15) + formatVolume(v);
-          }
-          if (data.obb && data.obb.axes) {
-            stats += '\nobb axes:';
-            for (let i = 0; i < 3; i++)
-              stats += '\n  ' + data.obb.axes[i].map(x => x.toFixed(4).padStart(8)).join(' ');
-          }
-          overlays = stats;
-        } else {
-          overlays = 'none (' + jsonUrl + ' -> HTTP ' + resp.status + ')';
-          bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
-          bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
-          bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
-          bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
+// Frees what the objects under `root` hold on the GPU.
+function disposeObject(root) {
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.skeleton) o.skeleton.dispose();
+    for (const material of [].concat(o.material || [])) {
+      for (const value of Object.values(material))
+        if (value && value.isTexture) {
+          value.dispose();
+          if (value.source && value.source.data && value.source.data.close) value.source.data.close(); // An ImageBitmap.
         }
-      } catch (e) {
-        overlays = 'none (fetch failed: ' + e + ')';
-        bindCheckbox(cbHull, document.getElementById('lbl-hull'), false);
-        bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), false);
-        bindCheckbox(cbOBB, document.getElementById('lbl-obb'), false);
-        bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
-      }
+      material.dispose();
+    }
+  });
+}
 
-      fitCamera(model, overlayBox);
-      hudText.textContent = url + '\n' + overlays;
-    },
-    undefined,
-    (err) => fail('failed to load ' + url + '\n' + err)
-  );
+function removeOverlays() {
+  if (overlayRoot) {
+    scene.remove(overlayRoot);
+    disposeObject(overlayRoot);
+  }
+  overlayRoot = hullGroup = hullTriLines = obbGroup = null;
+  aabbGroups = [];
+  result = null;
+  jsonPanel.hidden = true;
+  jsonText.value = '';
+}
+
+function removeModel() {
+  removeOverlays();
+  if (model) {
+    scene.remove(model.object);
+    disposeObject(model.object);
+  }
+  model = null;
+}
+
+// Shows a message in place of the hull and the boxes (of the model, if there is one).
+function fail(msg) {
+  removeOverlays();
+  hudText.textContent = msg;
+  bindCheckboxes();
+  promptBox.hidden = !!model;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The calculation: calculator.js, in a worker.
+// ---------------------------------------------------------------------------------------------------------
+
+// The world space positions of all the vertices under `root`, as the model is drawn: a Float32Array of
+// xyz triples. A skinned mesh is posed by its bones, and morph targets are applied with the weights that
+// the file gives them.
+function extractPoints(root) {
+  scene.updateMatrixWorld(true);
+  const parts = [];
+  let total = 0;
+  root.traverse((o) => {
+    const position = (o.isMesh || o.isPoints || o.isLine) && o.geometry && o.geometry.attributes.position;
+    if (!position) return;
+    parts.push(o);
+    total += position.count * (o.isInstancedMesh ? o.count : 1);
+  });
+  const points = new Float32Array(3 * total);
+  const v = new THREE.Vector3(), world = new THREE.Matrix4(), instance = new THREE.Matrix4();
+  let k = 0;
+  for (const o of parts) {
+    const position = o.geometry.attributes.position, n = position.count;
+    const weights = o.morphTargetInfluences;
+    const posed = !!o.isSkinnedMesh || !!(o.isMesh && o.geometry.morphAttributes.position && weights && weights.some(w => w !== 0));
+    // The common case, in which the vertices are read straight from an array of floats.
+    const plain = !posed && position.isBufferAttribute && position.array instanceof Float32Array &&
+                  position.itemSize === 3 && !position.normalized;
+    const numInstances = o.isInstancedMesh ? o.count : 1;
+    for (let j = 0; j < numInstances; ++j) {
+      world.copy(o.matrixWorld);
+      if (o.isInstancedMesh) { o.getMatrixAt(j, instance); world.multiply(instance); }
+      if (plain) {
+        const a = position.array, e = world.elements;
+        for (let i = 0; i < 3 * n; i += 3) {
+          const x = a[i], y = a[i + 1], z = a[i + 2];
+          points[k++] = e[0] * x + e[4] * y + e[8] * z + e[12];
+          points[k++] = e[1] * x + e[5] * y + e[9] * z + e[13];
+          points[k++] = e[2] * x + e[6] * y + e[10] * z + e[14];
+        }
+      } else {
+        for (let i = 0; i < n; ++i) {
+          if (posed) o.getVertexPosition(i, v); else v.fromBufferAttribute(position, i);
+          v.applyMatrix4(world);
+          points[k++] = v.x; points[k++] = v.y; points[k++] = v.z;
+        }
+      }
+    }
+  }
+  return points;
+}
+
+// calculator.compute(points, tolerance, again) returns a Promise of the hull and the boxes of the points
+// (see web/calculator_api.js for the data). The calculation runs in a worker, so that the page stays
+// usable while a large model is computed, and so that it can be cancelled: calculator.cancel().
+// Where workers are not to be had (a page that is opened straight from the disk, in some browsers),
+// calculator.js is loaded as a script of the page instead. `again` is called for the points then: the
+// worker took the first ones.
+const calculator = (() => {
+  const CALCULATOR_URL = 'calculator.js';
+  let worker = null, workerHasWorked = false, pending = null, lastId = 0;
+  let inPage = null; // A Promise of the MinobbCalculator of the page, once that is what is used.
+
+  function failure(message) { return Object.assign(new Error(message), { noWorker: true }); }
+
+  function computeInWorker(points, tolerance) {
+    return new Promise((resolve, reject) => {
+      if (!worker) {
+        try {
+          worker = new Worker(CALCULATOR_URL);
+        } catch (e) {
+          reject(failure(e.message));
+          return;
+        }
+        worker.onmessage = (e) => {
+          workerHasWorked = true;
+          if (!pending || e.data.id !== pending.id) return;
+          const p = pending;
+          pending = null;
+          if (e.data.error !== undefined) p.reject(new Error(e.data.error)); else p.resolve(e.data.data);
+        };
+        worker.onerror = (e) => {
+          const p = pending;
+          pending = null;
+          worker.terminate();
+          worker = null;
+          if (p) p.reject(failure(e.message || 'calculator.js did not start'));
+        };
+      }
+      pending = { id: ++lastId, resolve, reject };
+      worker.postMessage({ id: pending.id, points, tolerance }, [points.buffer]);
+    });
+  }
+
+  function loadInPage() {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = CALCULATOR_URL;
+      script.onload = () => resolve(window.MinobbCalculator);
+      script.onerror = () => reject(new Error('could not load calculator.js (build_viewer.py builds it)'));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function compute(points, tolerance, again) {
+    if (!inPage) {
+      try {
+        return await computeInWorker(points, tolerance);
+      } catch (e) {
+        if (!e.noWorker || workerHasWorked) throw e;
+      }
+      inPage = loadInPage();
+      inPage.catch(() => { inPage = null; });
+      points = again();
+    }
+    const inPageCalculator = await inPage;
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve))); // Lets the page draw first.
+    return inPageCalculator.compute(points, tolerance);
+  }
+
+  function cancel() {
+    if (!pending) return;
+    const p = pending;
+    pending = null;
+    worker.terminate();
+    worker = null;
+    p.reject(new Error('cancelled'));
+  }
+
+  return { compute, cancel };
+})();
+
+// The tolerance of the input box, or null if what the box has is not one.
+function readTolerance() {
+  const tolerance = toleranceInput.value.trim() === '' ? NaN : Number(toleranceInput.value);
+  const valid = tolerance >= 0 && isFinite(tolerance);
+  toleranceInput.classList.toggle('invalid', !valid);
+  return valid ? tolerance : null;
+}
+
+// Counts the calculations that have been started: one that is no longer the latest drops its result.
+let computeCount = 0;
+
+// Computes the hull and the boxes of the model, and shows them.
+async function computeBoxes() {
+  const tolerance = readTolerance();
+  if (!model) return;
+  if (tolerance === null) {
+    // (The boxes that are there stay until the tolerance is one again.)
+    if (!result) fail(model.label + '\nset the OBB tolerance to 0 or more, to compute the boxes');
+    return;
+  }
+  const count = ++computeCount;
+  calculator.cancel();
+
+  const points = extractPoints(model.object);
+  const numPoints = points.length / 3;
+  if (numPoints === 0) {
+    fail(model.label + '\nthe model has no vertices');
+    return;
+  }
+  const started = performance.now();
+  const status = () => {
+    const seconds = Math.floor((performance.now() - started) / 1000);
+    hudText.textContent = model.label + '\ncomputing the convex hull and the OBB of ' + numPoints.toLocaleString('en-US') +
+      ' vertices ...' + (seconds >= 2 ? ' ' + seconds + ' s' : '') +
+      (tolerance === 0 && seconds >= 5 ? '\n(with a tolerance of 0, a finely tessellated round shape can take minutes)' : '');
+  };
+  status();
+  const timer = setInterval(status, 1000);
+  try {
+    const data = await calculator.compute(points, tolerance, () => extractPoints(model.object));
+    if (count !== computeCount) return;
+    showResult(data, 'computed in the browser, tolerance ' + tolerance);
+  } catch (e) {
+    if (count !== computeCount) return;
+    console.error(e);
+    fail(model.label + '\nthe calculation failed: ' + (e && e.message || e));
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+toleranceInput.addEventListener('change', computeBoxes);
+toleranceInput.addEventListener('input', readTolerance);
+
+// ---------------------------------------------------------------------------------------------------------
+// The results: the overlays, the numbers of the HUD panel and the JSON.
+// ---------------------------------------------------------------------------------------------------------
+
+// Shows the hull and the boxes of `data` (an object like the JSON of minobb_glb) over the model.
+function showResult(data, source) {
+  removeOverlays();
+  result = { data, source };
+
+  // The overlays live in a sibling group, NOT under the model: three.js
+  // inherits a parent's invisibility to its whole subtree, so parenting
+  // them to the model would make "Show object" hide them as well. The
+  // JSON coordinates are in world space, and gltf.scene sits at the scene
+  // root with an identity transform, so scene-space == model-root-space.
+  const parent = overlayRoot = new THREE.Group();
+  scene.add(parent);
+  let overlayBox = null; // The box of all the points that the hull and the boxes were computed from.
+  if (data.hull && data.hull.vertices && data.hull.vertices.length &&
+      data.hull.faces && data.hull.faces.length) {
+    hullGroup = drawHull(data.hull);
+    hullGroup.visible = cbHull.checked;
+    parent.add(hullGroup);
+    hullTriLines = drawHullTriangles(data.hull);
+    hullTriLines.visible = cbHullTri.checked;
+    parent.add(hullTriLines);
+  }
+  let obbOk = false;
+  // Note: h >= 0, not h > 0 — a valid OBB of a planar (or collinear)
+  // point set has zero extent along one (or two) axes; only the
+  // C++ degenerate sentinel (negative extents) is rejected, via
+  // !data.obb.degenerate.
+  if (data.obb && !data.obb.degenerate &&
+      data.obb.half_extents.every(h => h >= 0)) {
+    obbGroup = drawOBB(data.obb);
+    obbGroup.visible = cbOBB.checked;
+    parent.add(obbGroup);
+    obbOk = true;
+  }
+  if (data.aabb_vertices) {
+    overlayBox = new THREE.Box3(new THREE.Vector3(...data.aabb_vertices.min), new THREE.Vector3(...data.aabb_vertices.max));
+    const g = drawAABB({ ...data.aabb_vertices, color: 0x44ff44 }); // green: all vertices
+    g.visible = cbAABB.checked;
+    parent.add(g);
+    aabbGroups.push(g);
+  }
+  if (data.aabb_hull) {
+    const g = drawAABB({ ...data.aabb_hull, color: 0xff44ff });     // magenta: hull vertices
+    g.visible = cbAABB.checked;
+    parent.add(g);
+    aabbGroups.push(g);
+  }
+  bindCheckboxes();
+
+  let stats = 'boxes: ' + source +
+              `\nvertices: ${data.vertices !== undefined ? data.vertices.toLocaleString('en-US') : '-'}  ` +
+              `hull: ${data.hull ? data.hull.vertices.length + 'v / ' + data.hull.faces.length + 'f' : '-'}  ` +
+              (obbOk ? 'obb: yes' : 'obb: no');
+  if (data.timing)
+    stats += `\ntime: hull ${formatTime(data.timing.hull_sec)}, obb ${formatTime(data.timing.obb_sec)}`;
+  const vols = [];
+  if (data.hull && data.hull.vertices && data.hull.faces)
+    vols.push(['convex hull', hullVolume(data.hull)]);
+  if (data.aabb_vertices)
+    vols.push(['aabb (vertices)', data.aabb_vertices.volume]);
+  if (data.aabb_hull)
+    vols.push(['aabb (hull)', data.aabb_hull.volume]);
+  if (data.obb && data.obb.volume !== undefined)
+    vols.push(['obb', data.obb.volume]);
+  if (vols.length) {
+    stats += '\nvolume:';
+    for (const [name, v] of vols)
+      stats += '\n  ' + name.padEnd(15) + formatVolume(v);
+  }
+  if (data.obb && data.obb.axes) {
+    stats += '\nobb axes:';
+    for (let i = 0; i < 3; i++)
+      stats += '\n  ' + data.obb.axes[i].map(x => x.toFixed(4).padStart(8)).join(' ');
+  }
+  hudText.textContent = model.label + '\n' + stats;
+
+  if (!cameraMoved) fitCamera(model.object, overlayBox);
+  showJSON();
+}
+
+// JSON text like that of minobb_glb: an object or an array of arrays takes a line per member, and an
+// array of numbers is written on one line.
+function formatJSON(value, indent = '') {
+  if (Array.isArray(value)) {
+    if (!value.some(v => v !== null && typeof v === 'object'))
+      return '[' + value.map(v => JSON.stringify(v)).join(', ') + ']';
+    return '[\n' + value.map(v => indent + '  ' + formatJSON(v, indent + '  ')).join(',\n') + '\n' + indent + ']';
+  }
+  if (value !== null && typeof value === 'object') {
+    const members = Object.entries(value).filter(([, v]) => v !== undefined)
+      .map(([k, v]) => indent + '  ' + JSON.stringify(k) + ': ' + formatJSON(v, indent + '  '));
+    return members.length ? '{\n' + members.join(',\n') + '\n' + indent + '}' : '{}';
+  }
+  return JSON.stringify(value);
+}
+
+// The JSON document of the results. It has what the JSON of minobb_glb has, the boxes first. Of the convex
+// hull it has the size and the volume, and only if `withHull` is set, also the vertices and the faces: a
+// hull can have hundreds of thousands of them.
+function resultDocument(withHull) {
+  const { hull, obb, aabb_vertices, aabb_hull, ...rest } = result.data;
+  const doc = { file: model.name, obb, aabb_vertices, aabb_hull };
+  if (hull && hull.vertices && hull.faces) {
+    doc.hull = {
+      degenerate: hull.degenerate,
+      num_vertices: hull.vertices.length,
+      num_faces: hull.faces.length,
+      volume: +hullVolume(hull).toPrecision(9)
+    };
+    if (withHull) Object.assign(doc.hull, { vertices: hull.vertices, faces: hull.faces });
+  }
+  return Object.assign(doc, rest);
+}
+
+// The text box shows at most this many characters of the JSON. (A text box with the tens of megabytes of
+// a large hull in it makes the page crawl.) The Copy button copies all of it in any case.
+const MAX_JSON_SHOWN = 1000000;
+let jsonAll = '';
+
+function showJSON() {
+  if (!result) return;
+  jsonAll = formatJSON(resultDocument(cbJsonHull.checked)) + '\n';
+  if (jsonAll.length <= MAX_JSON_SHOWN) {
+    jsonText.value = jsonAll;
+  } else {
+    const cut = jsonAll.lastIndexOf('\n', MAX_JSON_SHOWN) + 1;
+    jsonText.value = jsonAll.slice(0, cut) + '... (' + (jsonAll.length - cut).toLocaleString('en-US') +
+      ' more characters are not shown here: "Copy JSON" copies all of the document)\n';
+  }
+  jsonText.scrollTop = 0;
+  copiedText.textContent = '';
+  jsonPanel.hidden = false;
+}
+
+cbJsonHull.addEventListener('change', () => { showJSON(); savePrefs(); });
+
+document.getElementById('copy').addEventListener('click', async () => {
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(jsonAll);
+  } catch (e) {
+    // No clipboard API (it needs https or localhost): the old way, through a selection.
+    const box = document.createElement('textarea');
+    box.value = jsonAll;
+    box.style.cssText = 'position: fixed; opacity: 0;';
+    document.body.appendChild(box);
+    box.select();
+    try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+    box.remove();
+  }
+  const text = ok ? 'Copied ' + jsonAll.length.toLocaleString('en-US') + ' characters' : 'Could not copy: select the text and copy it';
+  copiedText.textContent = text;
+  setTimeout(() => { if (copiedText.textContent === text) copiedText.textContent = ''; }, 3000);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Loading a model: from a URL, or from dropped files.
+// ---------------------------------------------------------------------------------------------------------
+
+// Counts the models that have been asked for: a model that finishes loading after another one was asked
+// for is dropped.
+let loadCount = 0;
+
+// Replaces the model of the page with the one that load() returns a Promise of (the result of a GLTFLoader),
+// and shows its hull and boxes: those of the JSON at jsonUrl if it is given and exists, computed ones otherwise.
+// `name` is the name of the model's file, and `label` is what the HUD panel calls the model.
+async function loadModel(name, label, load, jsonUrl) {
+  const count = ++loadCount;
+  ++computeCount;
+  calculator.cancel();
+  removeModel();
+  bindCheckboxes();
+  promptBox.hidden = true;
+  hudText.textContent = 'loading ' + label + ' ...';
+
+  let gltf;
+  try {
+    gltf = await load();
+    if (!gltf.scene) throw new Error('the file has no scene');
+  } catch (e) {
+    console.error(e);
+    if (count === loadCount) fail('failed to load ' + label + '\n' + (e && e.message || e));
+    return;
+  }
+  if (count !== loadCount) {
+    disposeObject(gltf.scene);
+    return;
+  }
+  model = { name, label, object: gltf.scene };
+  scene.add(model.object);
+  model.object.visible = cbObject.checked;
+  bindCheckboxes();
+  cameraMoved = false;
+  fitCamera(model.object, null);
+
+  // minobb_glb computes the hull/OBB in scene (world) space over all
+  // meshes, and so does the calculator of the page.
+  let data = null;
+  if (jsonUrl) {
+    hudText.textContent = label + '\nloading ' + jsonUrl + ' ...';
+    try {
+      const resp = await fetch(jsonUrl);
+      if (resp.ok) data = await resp.json();
+    } catch (e) { /* No such file, or it is not JSON: the boxes are computed. */ }
+    if (count !== loadCount) return;
+  }
+  if (data && data.hull && data.obb) showResult(data, 'from ' + jsonUrl);
+  else await computeBoxes();
+}
+
+function loadURL(url) {
+  // The results of minobb_glb for a model are in the .json file next to it, if anywhere.
+  const jsonUrl = /\.(glb|gltf)$/i.test(url) ? url.replace(/\.(glb|gltf)$/i, '.json') : null;
+  let name = url.replace(/[?#].*$/, '').replace(/^.*\//, '');
+  try { name = decodeURIComponent(name); } catch (e) { /* Not an escaped name: as it is. */ }
+  return loadModel(name || url, url,
+    () => runLoader(newGLTFLoader(new THREE.LoadingManager()), loader => loader.loadAsync(url)), jsonUrl);
+}
+
+// A path without its "." and ".." parts.
+function normalizePath(path) {
+  const parts = [];
+  for (const part of path.split('/')) {
+    if (part === '..') parts.pop();
+    else if (part !== '.' && part !== '') parts.push(part);
+  }
+  return parts.join('/');
+}
+
+// Loads the model among the given files: a Map from the path of each file to its File. The other files
+// are there for the model to refer to (the buffers and the textures of a .gltf).
+async function loadFiles(files) {
+  const models = [...files.keys()].filter(path => /\.(glb|gltf)$/i.test(path))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  if (models.length === 0) {
+    ++loadCount;
+    ++computeCount;
+    calculator.cancel();
+    removeModel();
+    fail(files.size ? 'none of the ' + files.size + ' dropped files is a .glb or a .gltf file' : 'no files were dropped');
+    return;
+  }
+  const rootPath = models[0], rootFile = files.get(rootPath);
+  const folder = rootPath.slice(0, rootPath.lastIndexOf('/') + 1);
+  const label = rootFile.name + (models.length > 1 ? ' (the first of ' + models.length + ' dropped models)' : '');
+
+  // The file that a URI of the model refers to: by its path from the folder of the model, or failing that,
+  // by its name alone.
+  const find = (uri) => {
+    for (let candidate of [uri, (() => { try { return decodeURIComponent(uri); } catch (e) { return uri; } })()]) {
+      candidate = candidate.replace(/\\/g, '/');
+      const byPath = files.get(normalizePath(folder + candidate));
+      if (byPath) return byPath;
+      const fileName = candidate.slice(candidate.lastIndexOf('/') + 1);
+      for (const [path, file] of files)
+        if (path.slice(path.lastIndexOf('/') + 1) === fileName) return file;
+    }
+    return null;
+  };
+
+  // The loader is given the model as data, and a made up address for it: the URLs of the other files
+  // that it then asks for start with that address, and are answered with the dropped files.
+  const DROPPED = 'dropped-files:/';
+  const blobUrls = new Map();
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (!url.startsWith(DROPPED)) return url;
+    const file = find(url.slice(DROPPED.length));
+    if (!file) return url;
+    if (!blobUrls.has(file)) blobUrls.set(file, URL.createObjectURL(file));
+    return blobUrls.get(file);
+  });
+
+  await loadModel(rootFile.name, label, async () => {
+    try {
+      const content = await rootFile.arrayBuffer();
+      if (/\.gltf$/i.test(rootPath)) {
+        // A .gltf alone is the usual mistake: say which files are missing.
+        let json;
+        try { json = JSON.parse(new TextDecoder().decode(content)); } catch (e) { throw new Error('the file is not valid JSON'); }
+        const missing = (json.buffers || []).map(b => b && b.uri)
+          .filter(uri => typeof uri === 'string' && !/^data:/i.test(uri) && !find(uri));
+        if (missing.length)
+          throw new Error('the model needs ' + missing.join(', ') + ':\ndrop ' + (missing.length > 1 ? 'them' : 'it') +
+            ' on the page together with the .gltf file (or drop the folder that they are in)');
+      }
+      return await runLoader(newGLTFLoader(manager), loader => loader.parseAsync(content, DROPPED));
+    } finally {
+      for (const blobUrl of blobUrls.values()) URL.revokeObjectURL(blobUrl);
+    }
+  }, null);
+}
+
+// The files of a drop, as a Map from their paths to the Files. A dropped folder gives all the files in it.
+function filesOfDrop(dataTransfer) {
+  const files = new Map();
+  // (The entries must be asked for before the event handler returns: after that the items are gone.)
+  const entries = [...(dataTransfer.items || [])]
+    .map(item => item.kind === 'file' && item.webkitGetAsEntry ? item.webkitGetAsEntry() : null).filter(Boolean);
+  if (entries.length === 0) {
+    for (const file of dataTransfer.files) files.set(file.name, file);
+    return Promise.resolve(files);
+  }
+  const walk = (entry, folder) => new Promise((resolve, reject) => {
+    if (entry.isFile) {
+      entry.file((file) => { files.set(folder + entry.name, file); resolve(); }, reject);
+    } else {
+      const reader = entry.createReader();
+      const children = [];
+      const more = () => reader.readEntries((batch) => { // (A folder is listed in batches, until an empty one.)
+        if (batch.length) { children.push(...batch); more(); }
+        else Promise.all(children.map(child => walk(child, folder + entry.name + '/'))).then(resolve, reject);
+      }, reject);
+      more();
+    }
+  });
+  return Promise.all(entries.map(entry => walk(entry, ''))).then(() => files);
+}
+
+const draggingFiles = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+let dragDepth = 0;
+addEventListener('dragenter', (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  ++dragDepth;
+  document.body.classList.add('dragging');
+});
+addEventListener('dragover', (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault(); // (Without this the browser opens the dropped file itself.)
+  e.dataTransfer.dropEffect = 'copy';
+});
+addEventListener('dragleave', (e) => {
+  if (!draggingFiles(e)) return;
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    document.body.classList.remove('dragging');
+  }
+});
+addEventListener('drop', (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dragging');
+  filesOfDrop(e.dataTransfer).then(loadFiles, (error) => fail('could not read the dropped files\n' + (error && error.message || error)));
+});
+
+for (const id of ['open', 'choose'])
+  document.getElementById(id).addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) loadFiles(new Map([...fileInput.files].map(file => [file.name, file])));
+  fileInput.value = ''; // (So that choosing the same file again loads it again.)
+});
+
+if (url) {
+  loadURL(url);
+} else {
+  hudText.textContent = 'no model';
+  bindCheckboxes();
+  promptBox.hidden = false;
 }
 
 renderer.setAnimationLoop(() => {

@@ -40,6 +40,14 @@ The above program computes the minimum volume OBB for the given point set. As a 
 
 The box is returned as its center `pos`, its half extents `r` and its three orthonormal axes `axis[0..2]`: a point `p` is inside the OBB if `|dot(axis[i], p - pos)| <= r[i]` for each `i`.
 
+## Online Calculator
+
+To quickly compute the minimal OBB for a given GLTF/GLB file, open the [online viewer](https://juj.github.io/minobb/site/view.html), and then drag-n-drop your GLTF file to it. The page will then compute the minimum volume OBB for you.
+
+The page draws the model with its convex hull, its OBB and its axis-aligned bounding box, and shows the boxes as JSON (in the format of the command line tool below) in a text box, with a `Copy JSON` button under it. A `.gltf` file needs its `.bin` and texture files dropped with it: drop them all at once, or drop the folder that has them. The `tolerance` can be set on the page.
+
+The calculation runs in your browser, the model is not uploaded anywhere. The calculator of the page is the code of this repository compiled to WebAssembly: `python build_viewer.py` builds it into `site/calculator.js` (requires `em++` of [Emscripten](https://emscripten.org) on the path).
+
 ## Command Line Tool
 
 If you would like to have a command line tool that computes the minimum volume OBB of a glTF file, build `minobb_glb`:
