@@ -4,7 +4,13 @@
 
 [[GitHub: juj/minobb]](https://github.com/juj/minobb)
 
-This repository contains C++ code for calculating the minimum enclosing oriented bounding box (OBB) by volume for 3D polyhedra.
+This repository contains embeddable C++ library code for calculating the minimum enclosing oriented bounding box (OBB) by volume for 3D polyhedra.
+
+# Try it Live
+
+To try out the calculator on a given GLTF/GLB file, open the [online viewer](https://juj.github.io/minobb/site/view.html), and then drag-n-drop your GLTF file to it. The page will then compute the minimum volume OBB for you.
+
+The calculation runs in your browser using WebAssembly. Source code can be built locally: `python build_viewer.py` builds it into `site/calculator.js` (requires `em++` of [Emscripten](https://emscripten.org) in PATH).
 
 # Getting Started
 
@@ -39,12 +45,6 @@ c++ -O2 -std=c++17 example.cpp minobb.cpp convex_hull.cpp -o example
 The above program computes the minimum volume OBB for the given point set. As a necessary intermediate step, the convex hull of the object needs to be computed. Adjust the `tolerance` parameter of `minobb()` to control the precision-vs-speed tradeoff.
 
 The box is returned as its center `pos`, its half extents `r` and its three orthonormal axes `axis[0..2]`: a point `p` is inside the OBB if `|dot(axis[i], p - pos)| <= r[i]` for each `i`.
-
-## Online Calculator
-
-To try out the calculator on a given GLTF/GLB file, open the [online viewer](https://juj.github.io/minobb/site/view.html), and then drag-n-drop your GLTF file to it. The page will then compute the minimum volume OBB for you.
-
-The calculation runs in your browser using WebAssembly. Source code can be built locally: `python build_viewer.py` builds it into `site/calculator.js` (requires `em++` of [Emscripten](https://emscripten.org) in PATH).
 
 ## Command Line Tool
 
