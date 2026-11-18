@@ -2,6 +2,8 @@
 
 ![A model with its convex hull (blue), its minimum volume OBB (orange) and its axis-aligned bounding box (purple)](screenshot.png)
 
+[[GitHub: juj/minobb]](https://github.com/juj/minobb)
+
 This repository contains C++ code for calculating the minimum enclosing oriented bounding box (OBB) by volume for 3D polyhedra.
 
 # Quick Getting Started
@@ -55,7 +57,7 @@ This generates a JSON file with the convex hull (vertices and faces), the OBB (c
 
 The code in this repository utilizes my research on minimum OBB computation from 2015: [An Exact Algorithm for Finding Minimum Oriented Bounding Boxes](minobb_jylanki_2015_06_01.pdf).
 
-The main idea of the algorithm is the observation that the minimum volume OBB is spanned by three distinct edge-face contacts of the polyhedron and the OBB. The algorithm enumerates combinations of such edge-face contacts quickly to find the minimum one. These combinations fall into distinct category classes. See [the contact categories A–D](https://juj.github.io/minobb/cases.html) for an example polyhedron of each.
+The main idea of the algorithm is the observation that the minimum volume OBB is spanned by three distinct edge-face contacts of the polyhedron and the OBB. The algorithm enumerates combinations of such edge-face contacts quickly to find the minimum one. These combinations fall into distinct category classes. See [the contact categories A–D](https://juj.github.io/minobb/site/cases.html) for an example polyhedron of each.
 
 On top of the enumeration of the paper, the implementation skips edges and directions that cannot lead to a smaller box than the best one found so far. With a `tolerance`, it also skips searching edge configurations that cannot improve the volume by more than the given tolerance.
 
@@ -63,13 +65,13 @@ In the original publication, the optimality of the algorithm was not yet proven.
 
 # Proof of Optimality
 
-The paper conjectured that a box of minimal volume around a convex polyhedron has at least three distinct edge-face contacts with it, at least two of them on adjacent faces of the box (Conjecture 7.1). The proof is written up in [A proof of the three-contact conjecture for minimum-volume bounding boxes](https://juj.github.io/minobb/proof.html).
+The paper conjectured that a box of minimal volume around a convex polyhedron has at least three distinct edge-face contacts with it, at least two of them on adjacent faces of the box (Conjecture 7.1). The proof is written up in [A proof of the three-contact conjecture for minimum-volume bounding boxes](https://juj.github.io/minobb/site/proof.html).
 
 ## Lean Formalization
 
 The proof has been formalized by Claude Fable 5.2 in Lean 4, with Mathlib. The Lean proof can be found in the directory [lean/](lean/), with its own [README](lean/README.md) that lists the main theorems and how the files follow the written proof.
 
-For a walkthrough of the Lean proof, check out [The Lean proof, step by step](https://juj.github.io/minobb/lean-walkthrough.html).
+For a walkthrough of the Lean proof, check out [The Lean proof, step by step](https://juj.github.io/minobb/site/lean-walkthrough.html).
 
 ### Running the Lean proof yourself
 
@@ -88,7 +90,7 @@ lake env lean Verify.lean   # prints the statements of the main theorems and the
 
 The algorithm has been tested on 6,933 glTF models from the [Objaverse](https://objaverse.allenai.org/) data set, of up to 15 million vertices each, with convex hulls of up to 323,658 vertices. For every model, the box of `minobb()` is compared with the result of an exhaustive search in double precision: with `tolerance=0` the results have been confirmed to be equal.
 
-[The test results](https://juj.github.io/minobb/results.html) show the computation times of the convex hull and of the OBB for each model in the test set. With the default tolerance, the OBB of a typical model takes half a millisecond for a hull of under 100 vertices, 3 milliseconds for one of hundreds of vertices, and 20 milliseconds for one of thousands, on one thread of a desktop CPU. The slowest model of the data set takes 5 seconds.
+[The test results](https://juj.github.io/minobb/site/results.html) show the computation times of the convex hull and of the OBB for each model in the test set. With the default tolerance, the OBB of a typical model takes half a millisecond for a hull of under 100 vertices, 3 milliseconds for one of hundreds of vertices, and 20 milliseconds for one of thousands, on one thread of a desktop CPU. The slowest model of the data set takes 5 seconds.
 
 ## Running tests
 
