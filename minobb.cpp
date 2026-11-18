@@ -426,6 +426,18 @@ struct Edge
 
 static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &points, const vec3 &dir0, const vec3 &dir1);
 
+// The axes of the box that FixedOrientationEnclosingOBB() makes for the directions dir0 and dir1: dir0, dir1
+// made orthogonal to it, and their cross product, as unit vectors.
+static void BoxAxes(const vec3 &dir0, const vec3 &dir1, vec3 axis[3])
+{
+	dvec3 a[3];
+	a[0] = Normalized(dvec3(dir0));
+	a[1] = Normalized(dvec3(dir1) - a[0] * dot(a[0], dvec3(dir1)));
+	a[2] = cross(a[0], a[1]);
+	for (int i = 0; i < 3; ++i)
+		axis[i] = a[i].ToFloat();
+}
+
 // Finds the extreme (min and max) points along a direction.
 static void ExtremePointsAlongDirection(const std::vector<vec3> &points, const vec3 &dir,
 	int &idxSmallest, int &idxLargest, float &smallestD, float &largestD)
@@ -1079,18 +1091,165 @@ static bool AreEdgesBad(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const
 #endif
 }
 
-// Makes the box with the axes n1 and n2 (and their cross product) the best box, if it is smaller than
-// the best box so far. `volume` is the volume that the search derived for it from the vertices it assumed
-// the box to be in contact with: that can only be smaller than the volume of the actual tightest box of
-// that orientation, which therefore is measured only if `volume` is below the best volume so far.
-static void TestBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &n2, float volume,
-	float *minVolume, OBB *minOBB)
+static int ClimbAlong(const std::vector<vec3> &vtx, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, int startingVertex);
+
+// Sets `found` to the vertices of the hull that are the farthest along `direction`: to all the vertices that
+// are within `margin` of the farthest one, and perhaps some more. A climb from startingVertex gets to the
+// farthest vertex, or near it. On a convex polyhedron the vertices that are at least as far as any given
+// distance are connected, so the rest is a walk from neighbor to neighbor. (`margin` is to be far larger than
+// what a distance rounds by. Then the walk also gets past the vertices that tie, where a climb stops.)
+// `visited` has a mark for each vertex, and `color` is a mark that none of them has yet.
+static void FarVerticesAlong(const std::vector<vec3> &vtx, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction,
+	int startingVertex, float margin, std::vector<unsigned long long> &visited, unsigned long long color, std::vector<int> &found)
 {
-	if (!(volume < *minVolume))
-		return;
+	found.clear();
+	found.push_back(ClimbAlong(vtx, adjacencyData, direction, startingVertex));
+	visited[found[0]] = color;
+	float farthest = dot(direction, vtx[found[0]]);
+	for (size_t i = 0; i < found.size(); ++i)
+	{
+		const std::vector<int> &neighbors = adjacencyData[found[i]];
+		for (size_t j = 0; j < neighbors.size(); ++j)
+		{
+			const int n = neighbors[j];
+			if (visited[n] == color)
+				continue;
+			const float d = dot(direction, vtx[n]);
+			if (d < farthest - margin)
+				continue;
+			visited[n] = color;
+			found.push_back(n);
+			farthest = std::max(farthest, d);
+		}
+	}
+}
+
+// What MeasureBox() needs for measuring a box with only the vertices of the hull that decide its size, and
+// its count of whether that pays off on the hull at hand: see MeasureBox().
+struct BoxProbe
+{
+	const std::vector<std::vector<int> > &adjacencyData;
+	// The marks of its searches. (Not those of the caller, who can have a graph search of its own under way.)
+	std::vector<unsigned long long> visited;
+	unsigned long long visitColor;
+	// The latest searches: the direction of each, the far vertices that it found along it, and when it was
+	// last of use.
+	enum { numSearches = 12 };
+	vec3 direction[numSearches];
+	std::vector<int> farVertices[numSearches];
+	long long lastUse[numSearches], numUses;
+	// What the searches have saved so far, less what they have taken, in vertices of a pass over the hull.
+	long long balance;
+	std::vector<vec3> points;
+
+	BoxProbe(const std::vector<std::vector<int> > &adjacencyData_, size_t numVertices)
+		: adjacencyData(adjacencyData_), visited(numVertices), visitColor(0), numUses(0), balance(0)
+	{
+		for (int i = 0; i < numSearches; ++i)
+			lastUse[i] = 0;
+	}
+};
+
+// Measures the box with the axes n1 and n2 (and their cross product), and makes it the best box if it is
+// smaller than the best box so far.
+// (hullV are the vertices of the hull as OptimalEnclosingOBB3D() gets them: at most 28 from the origin.)
+// (Not to be inlined: this is called for few of the boxes that TestBox() is, and as a part of the code of its
+// callers it slows the search of a small hull down by a percent or two.)
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static void MeasureBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &n2, float *minVolume, OBB *minOBB, BoxProbe &probe)
+{
 	// The axes must be (roughly) orthonormal for this to be a box at all. This also catches zero vectors and NaNs.
 	if (!(fabsf(LengthSq(n1) - 1.f) < 0.01f && fabsf(LengthSq(n2) - 1.f) < 0.01f && fabsf(dot(n1, n2)) < 0.01f))
 		return;
+
+	// Measuring the box takes passes over all the vertices of the hull. A hull with symmetries has thousands
+	// of boxes that are as small as its best box, up to rounding, and `volume` makes about half of them out
+	// to be smaller: all their passes are for nothing. So the box is first measured with only the six
+	// vertices that decide its size: the farthest ones along its axes, both ways. That gives the same box as
+	// all the vertices do, or a smaller one: so if it is no smaller than the best box, the box is of no use.
+	//
+	// Each of the six is the farthest one, as doubles tell it, of the far vertices that a search along the
+	// edges of the hull finds for its direction: of all the vertices that are within 0.01 of the farthest
+	// one. Or of the far vertices that an earlier search found, if that was along the same direction to
+	// within 5e-5 in each coordinate: two such directions differ by less than 0.005 in how far apart they
+	// have any two of the vertices, so the far vertices of one include the farthest vertex of the other. (A
+	// hull with symmetries has the same axis in box after box, and where that is the axis of a body of
+	// revolution, its far vertices are whole rings of vertices.)
+	//
+	// The searches take the time of a pass over 128 vertices or so, and more where many vertices tie, as on
+	// the flat sides of a box that is densely covered with vertices. probe.balance keeps count, and once the
+	// searches have taken much more than they have saved, there are no more of them.
+	const long long numVertices = (long long)hullV.size();
+	if (numVertices >= 256 && probe.balance >= -16 * numVertices)
+	{
+		const float sameDirection = 5e-5f, farMargin = 1e-2f;
+		vec3 axis[3];
+		BoxAxes(n1, n2, axis);
+		// (FixedOrientationEnclosingOBB() measures from the first point it is given: the same one here, for the same rounding.)
+		const dvec3 origin = hullV[0];
+		probe.points.clear();
+		probe.points.push_back(hullV[0]);
+		long long cost = 128;
+		for (int i = 0; i < 6; ++i)
+		{
+			const vec3 direction = (i & 1) ? -axis[i / 2] : axis[i / 2];
+			// The search along this direction, if there is one. Else the one that has been of no use for the
+			// longest makes way for a new search, which starts from where the search along the nearest
+			// direction got to.
+			int search = -1, oldest = 0, nearest = 0;
+			float nearestDot = -FLT_MAX;
+			for (int k = 0; k < BoxProbe::numSearches && search < 0; ++k)
+			{
+				if (probe.lastUse[k] < probe.lastUse[oldest])
+					oldest = k;
+				if (!probe.lastUse[k])
+					continue;
+				const vec3 difference = probe.direction[k] - direction;
+				if (fabsf(difference.x) <= sameDirection && fabsf(difference.y) <= sameDirection && fabsf(difference.z) <= sameDirection)
+					search = k;
+				else if (dot(probe.direction[k], direction) > nearestDot)
+				{
+					nearestDot = dot(probe.direction[k], direction);
+					nearest = k;
+				}
+			}
+			if (search < 0)
+			{
+				search = oldest;
+				FarVerticesAlong(hullV, probe.adjacencyData, direction, probe.lastUse[nearest] ? probe.farVertices[nearest][0] : 0, farMargin,
+					probe.visited, ++probe.visitColor, probe.farVertices[search]);
+				probe.direction[search] = direction;
+				cost += 4 * (long long)probe.farVertices[search].size(); // (A vertex of a search takes as long as four of a pass.)
+			}
+			else
+				cost += (long long)probe.farVertices[search].size() / 4;
+			probe.lastUse[search] = ++probe.numUses;
+
+			// The farthest one of them, by the distance that FixedOrientationEnclosingOBB() measures.
+			const std::vector<int> &farVertices = probe.farVertices[search];
+			int farthest = farVertices[0];
+			double farthestDistance = -DBL_MAX;
+			for (size_t j = 0; j < farVertices.size(); ++j)
+			{
+				const double distance = dot(dvec3(direction), dvec3(hullV[farVertices[j]]) - origin);
+				if (distance > farthestDistance)
+				{
+					farthestDistance = distance;
+					farthest = farVertices[j];
+				}
+			}
+			probe.points.push_back(hullV[farthest]);
+		}
+		const bool smaller = FixedOrientationEnclosingOBB(probe.points, n1, n2).Volume() < *minVolume;
+		probe.balance = std::min(probe.balance + (smaller ? 0 : numVertices) - cost, 16 * numVertices);
+		if (!smaller)
+			return;
+	}
+
 	OBB obb = FixedOrientationEnclosingOBB(hullV, n1, n2);
 	if (obb.Volume() < *minVolume)
 	{
@@ -1099,12 +1258,23 @@ static void TestBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &
 	}
 }
 
+// Makes the box with the axes n1 and n2 (and their cross product) the best box, if it is smaller than
+// the best box so far. `volume` is the volume that the search derived for it from the vertices it assumed
+// the box to be in contact with: that can only be smaller than the volume of the actual tightest box of
+// that orientation, which therefore is measured only if `volume` is below the best volume so far.
+static inline void TestBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &n2, float volume,
+	float *minVolume, OBB *minOBB, BoxProbe &probe)
+{
+	if (volume < *minVolume)
+		MeasureBox(hullV, n1, n2, minVolume, minOBB, probe);
+}
+
 // Port of TestThreeAdjacentFaces().
 static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n3,
 	int edgeI, int edgeJ, int edgeK,
 	const std::vector<vec3> &hullV, const std::vector<Edge> &edges,
 	const std::vector<std::vector<int>> &antipodalPointsForEdge,
-	float *minVolume, OBB *minOBB)
+	float *minVolume, OBB *minOBB, BoxProbe &probe)
 {
 	// Compute the most extreme points in each direction.
 	float maxN1 = dot(n1, hullV[edges[edgeI].first]);
@@ -1127,7 +1297,7 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 	float minN2 = minAlong(n2, antipodalPointsForEdge[edgeJ]);
 	float minN3 = minAlong(n3, antipodalPointsForEdge[edgeK]);
 	float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-	TestBox(hullV, n1, n2, volume, minVolume, minOBB);
+	TestBox(hullV, n1, n2, volume, minVolume, minOBB, probe);
 }
 
 // Climbs along the edges of the hull from startingVertex, each time to the neighbor that is the farthest along
@@ -1442,6 +1612,9 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 #define MARK_VERTEX_VISITED(v) (floodFillVisited[(v)] = floodFillVisitColor)
 #define HAVE_VISITED_VERTEX(v) (floodFillVisited[(v)] == floodFillVisitColor) // HAVE_VISITED_VERTEX(v) implies HAVE_QUEUED_VERTEX(v)
 #define CLEAR_GRAPH_SEARCH() (++floodFillVisitColor)
+
+	// For TestBox(): the searches that it measures a box with.
+	BoxProbe boxProbe(adjacencyData, hull.v.size());
 
 	// Stores for each edge index i the complete list of antipodal vertices for that edge.
 	std::vector<std::vector<int> > antipodalPointsForEdge(E);
@@ -1834,7 +2007,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				hint2 = ExtremeVertexConvex(hull, adjacencyData, -axis[a], floodFillVisited, floodFillVisitColor, dummy, farVertex[k + numSamples]);
 				faceWidth[a] = dot(dvec3(axis[a]), dvec3(vtx[hint1]) - dvec3(vtx[hint2]));
 			}
-			TestBox(vtx, arcMiddle[e], axis[0], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB);
+			TestBox(vtx, arcMiddle[e], axis[0], (float)(widthN1 * faceWidth[0] * faceWidth[1]), &minVolume, &minOBB, boxProbe);
 		}
 	};
 	// Computes the bounds of the given arcs. The more samples, the tighter the bound, and the longer it takes
@@ -2184,7 +2357,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			}
 
 			float volume = (maxN1 - minN1) * (maxN2 - minN2) * (maxN3 - minN3);
-			TestBox(hull.v, n1, n2, volume, &minVolume, &minOBB);
+			TestBox(hull.v, n1, n2, volume, &minVolume, &minOBB, boxProbe);
 		}
 	};
 
@@ -2400,7 +2573,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				{
 					TRACE_INC(edgeTripletsSolved);
 					TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
-						edges, antipodalPointsForEdge, &minVolume, &minOBB);
+						edges, antipodalPointsForEdge, &minVolume, &minOBB, boxProbe);
 				}
 			}
 			return true;
@@ -2553,17 +2726,13 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 // away from the origin the center cannot be represented accurately, which then costs some tightness.)
 static OBB FixedOrientationEnclosingOBB(const std::vector<vec3> &pointArray, const vec3 &dir0, const vec3 &dir1)
 {
-	dvec3 axis[3];
-	axis[0] = Normalized(dvec3(dir0));
-	axis[1] = Normalized(dvec3(dir1) - axis[0] * dot(axis[0], dvec3(dir1)));
-	axis[2] = cross(axis[0], axis[1]);
-
 	OBB obb;
+	BoxAxes(dir0, dir1, obb.axis);
+	dvec3 axis[3];
 	const dvec3 origin = pointArray[0];
 	dvec3 center = origin;
 	for (int i = 0; i < 3; ++i)
 	{
-		obb.axis[i] = axis[i].ToFloat();
 		axis[i] = obb.axis[i];
 		double minD = DBL_MAX, maxD = -DBL_MAX;
 		for (size_t j = 0; j < pointArray.size(); ++j)
