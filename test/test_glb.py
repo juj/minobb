@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-test_glb.py - regression test for the GLB hull/OBB pipeline.
+test_glb.py - regression test for the GLB hull/OBB/sphere pipeline.
 
 For every .glb under test/glb that has a reference .json next to it, this
-recomputes the convex hull + minimum-volume OBB with minobb_glb (freshly
-built into tmp/) over ALL world-space points (no subsampling), and compares
-the convex hull volume and the OBB volume against the values stored in the
-reference .json.
+recomputes the convex hull, the minimum-volume OBB and the minimum enclosing
+sphere with minobb_glb (freshly built into tmp/) over ALL world-space points
+(no subsampling), and compares the convex hull volume, the OBB volume and the
+radius of the sphere against the values stored in the reference .json. (A
+reference .json from before the sphere was added has no sphere to compare.)
 
-PASS if every volume matches (relative tolerance 1e-6); FAIL otherwise.
+PASS if every value matches (relative tolerance 1e-6); FAIL otherwise.
 The reference .json files are never modified (results go to tmp/glbtest/).
 
 Usage:        python test/test_glb.py
@@ -41,7 +42,7 @@ def build_exe():
     exe = os.path.join(TMP_DIR, "minobb_glb.exe")
     cmd = [CXX, "-O2", "-std=c++17", "-I.",
            "-o", os.path.relpath(exe, ROOT),
-           "minobb.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp")]
+           "minobb.cpp", "minsphere.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp")]
     p = subprocess.run(cmd, cwd=ROOT)
     if p.returncode != 0 or not os.path.exists(exe):
         return None
@@ -74,6 +75,13 @@ def obb_volume(obb):
     if not obb:
         return 0.0
     return float(obb.get("volume", 0.0))
+
+
+def sphere_radius(sphere):
+    """The radius of the sphere of the JSON, or None if the JSON has no sphere."""
+    if sphere is None:
+        return None
+    return float(sphere.get("radius", 0.0))
 
 
 def close(a, b):
@@ -139,15 +147,17 @@ def main():
 
         rh, nh = hull_volume(ref.get("hull")), hull_volume(new.get("hull"))
         ro, no = obb_volume(ref.get("obb")), obb_volume(new.get("obb"))
-        ok = close(rh, nh) and close(ro, no)
+        rs, ns = sphere_radius(ref.get("sphere")), sphere_radius(new.get("sphere"))
+        ok = close(rh, nh) and close(ro, no) and ns is not None and (rs is None or close(rs, ns))
         if ok:
             n_pass += 1
-            print(f"  PASS  {label}  hull {rh:.6g}  obb {ro:.6g}")
+            print(f"  PASS  {label}  hull {rh:.6g}  obb {ro:.6g}  sphere radius {ns:.6g}")
         else:
             n_fail += 1
             print(f"  FAIL  {label}")
             print(f"        hull volume: reference {rh:.9g} vs new {nh:.9g}")
             print(f"        obb volume:  reference {ro:.9g} vs new {no:.9g}")
+            print(f"        sphere radius: reference {rs} vs new {ns}")
 
     total = n_pass + n_fail
     suffix = f" ({n_fail} FAILED)" if n_fail else ""

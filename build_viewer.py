@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compiles the minimum OBB calculation code to WebAssembly with Emscripten,
 and writes site/calculator.js, which site/view.html uses to compute the convex
-hull and the bounding boxes of the models that are dropped on the page.
+hull, the bounding boxes and the minimum enclosing sphere of the models that
+are dropped on the page.
 
-The inputs are minobb.cpp, convex_hull.cpp, web/calculator.cpp (the functions
+The inputs are minobb.cpp, minsphere.cpp, convex_hull.cpp, web/calculator.cpp (the functions
 that the page calls) and web/calculator_api.js (the JavaScript interface, see
 its head comment). The output is a single file: the WebAssembly module is
 embedded in calculator.js, so nothing else needs to be deployed with it.
@@ -26,7 +27,7 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT_FILE = os.path.join("site", "calculator.js")
 
-SOURCES = ["minobb.cpp", "convex_hull.cpp", os.path.join("web", "calculator.cpp")]
+SOURCES = ["minobb.cpp", "minsphere.cpp", "convex_hull.cpp", os.path.join("web", "calculator.cpp")]
 API_JS = os.path.join("web", "calculator_api.js")
 
 EMXX_FLAGS = [
@@ -47,8 +48,8 @@ EMXX_FLAGS = [
     "--output-eol", "linux",              # The same file comes out on every platform.
 ]
 
-# Computes the box of the six points of the README's example, and checks it
-# against what a native build gives.
+# Computes the box and the sphere of the six points of the README's example,
+# and checks them against what a native build gives.
 SMOKE_TEST_JS = r"""
 const calculator = require(process.argv[1]);
 const points = new Float32Array([0,0,0, 4,1,0, 1,3,0, 2,2,5, 5,4,1, 0,1,4]);
@@ -60,6 +61,10 @@ const check = (ok, what) => { if (!ok) { console.error('FAILED: ' + what); proce
     check(data.vertices == 6 && data.hull.vertices.length == 6 && data.hull.faces.length == 8, 'the hull');
     check(data.aabb_vertices.volume == 100 && data.aabb_hull.volume == 100, 'the axis-aligned box');
     check(Math.abs(obb.volume - 77.64707) < (tolerance === 0 ? 1e-4 : 77.64707 * 0.0015), 'the volume of the OBB');
+    const sphere = data.sphere;
+    check(Math.abs(sphere.radius - 3.4363444) < 1e-6 && sphere.support.length == 3, 'the minimum sphere');
+    for (let i = 0; i < points.length; i += 3)
+      check(Math.hypot(points[i] - sphere.center[0], points[i + 1] - sphere.center[1], points[i + 2] - sphere.center[2]) <= sphere.radius, 'the sphere contains the points');
     for (let i = 0; i < points.length; i += 3)
       for (let a = 0; a < 3; ++a) {
         let d = 0;
@@ -67,7 +72,7 @@ const check = (ok, what) => { if (!ok) { console.error('FAILED: ' + what); proce
         check(Math.abs(d) <= obb.half_extents[a] + 1e-5, 'the OBB contains the points');
       }
   }
-  console.log('test ok: the box of the README example has the volume 77.647');
+  console.log('test ok: the box of the README example has the volume 77.647, and its sphere the radius 3.4363');
 })().catch(e => { console.error(e); process.exit(1); });
 """
 

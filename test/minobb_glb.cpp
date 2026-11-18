@@ -4,22 +4,24 @@
 //
 // Opens the GLB file given in argv[1], collects the POSITION vertices of
 // every primitive in the scene, transforms them into scene (world) space
-// using the glTF node graph, computes the convex hull and the minimum-volume
+// using the glTF node graph, computes the convex hull, the minimum-volume
 // OBB with minobb() (with its default tolerance: the box can be that much
-// larger than the minimum), and prints both as a JSON document to stdout.
+// larger than the minimum) and the minimum enclosing sphere with minsphere(),
+// and prints them as a JSON document to stdout.
 //
 // max_points (optional, 0 = no cap): the input may be reduced to at most
 // max_points with a deterministic uniform world-space grid (one point per
 // occupied cell). The reported "vertices" count is the number of points
 // actually used.
 //
-// Only dependencies: the C++ standard library, minobb.{h,cpp}, convex_hull.{h,cpp}
-// and glb.{h,cpp}.
+// Only dependencies: the C++ standard library, minobb.{h,cpp}, minsphere.{h,cpp},
+// convex_hull.{h,cpp} and glb.{h,cpp}.
 
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "minobb.h"
+#include "minsphere.h"
 #include "glb.h"
 #include <windows.h>
 #include <algorithm>
@@ -169,6 +171,18 @@ int main(int argc, char **argv)
 	else
 		fprintf(stderr, "info: obb: volume %g (%.3fs)\n", obb.Volume(), obb_sec);
 
+	// The minimum enclosing sphere, computed from the points. It does not need
+	// the hull: the time of computing it from the vertices of the hull instead
+	// (which gives the same sphere) is measured for comparison.
+	Sphere sphere, hull_sphere;
+	const double sphere_sec = TimeCall([&] { sphere = minsphere(pts.data(), num_pts, 12); });
+	const double sphere_hull_sec = TimeCall([&] { hull_sphere = minsphere(hull); });
+	if (sphere.IsDegenerate())
+		fprintf(stderr, "info: sphere: none, minsphere() returned a degenerate sphere (%.6fs)\n", sphere_sec);
+	else
+		fprintf(stderr, "info: sphere: radius %g, through %d of the points (%.6fs, from the hull %.6fs)\n",
+			sphere.r, sphere.numSupport, sphere_sec, sphere_hull_sec);
+
 	// Print the results as a single JSON document.
 	printf("{\n");
 	printf("  \"vertices\": %d,\n", num_pts);
@@ -176,7 +190,9 @@ int main(int argc, char **argv)
 		printf("  \"subsampled_from\": %d,\n", total_pts);
 	printf("  \"timing\": {\n");
 	printf("    \"hull_sec\": %.9f,\n", hull_sec);
-	printf("    \"obb_sec\": %.9f\n", obb_sec);
+	printf("    \"obb_sec\": %.9f,\n", obb_sec);
+	printf("    \"sphere_sec\": %.9f,\n", sphere_sec);
+	printf("    \"sphere_hull_sec\": %.9f\n", sphere_hull_sec);
 	printf("  },\n");
 
 	printf("  \"hull\": {\n");
@@ -241,6 +257,27 @@ int main(int argc, char **argv)
 			printf("%s\n      [%.9g, %.9g, %.9g]", i ? "," : "", obb.axis[i].x, obb.axis[i].y, obb.axis[i].z);
 		printf("\n    ],\n");
 		printf("    \"volume\": %.9g\n", obb.Volume());
+	}
+	printf("  },\n");
+
+	// The minimum enclosing sphere, with its support points: the two to four
+	// input points that it passes through and that determine it.
+	printf("  \"sphere\": {\n");
+	if (sphere.IsDegenerate())
+		printf("    \"degenerate\": true\n");
+	else
+	{
+		printf("    \"degenerate\": false,\n");
+		printf("    \"center\": [%.9g, %.9g, %.9g],\n", sphere.pos.x, sphere.pos.y, sphere.pos.z);
+		printf("    \"radius\": %.9g,\n", sphere.r);
+		printf("    \"volume\": %.9g,\n", sphere.Volume());
+		printf("    \"support\": [");
+		for (int i = 0; i < sphere.numSupport; i++)
+		{
+			const float *p = &pts[3 * (size_t)sphere.support[i]];
+			printf("%s\n      [%.9g, %.9g, %.9g]", i ? "," : "", p[0], p[1], p[2]);
+		}
+		printf("\n    ]\n");
 	}
 	printf("  }\n");
 	printf("}\n");

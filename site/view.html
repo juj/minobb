@@ -94,21 +94,22 @@
   <label id="lbl-hulltri"><input type="checkbox" id="cb-hulltri"> Show hull triangles (blue)</label>
   <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB (orange)</label>
   <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB (purple)</label>
+  <label id="lbl-sphere" title="The minimum enclosing sphere, with the points of the model that it passes through and that define it."><input type="checkbox" id="cb-sphere" checked> Show min sphere (green)</label>
   <hr>
   <label id="lbl-dark"><input type="checkbox" id="cb-dark" checked> Dark Mode</label>
   <hr>
   <div id="citation">Based on <a href="minobb_jylanki_2015_06_01.pdf">J. Jylänki: <i>An Exact Algorithm for Finding Minimum Oriented Bounding Boxes</i> (2015)</a></div>
 </div>
 <details id="jsonpanel" class="panel" open hidden>
-  <summary>Bounding boxes (JSON)</summary>
-  <textarea id="jsontext" readonly spellcheck="false" wrap="off" aria-label="The bounding boxes of the model as JSON"></textarea>
+  <summary>Bounding boxes and sphere (JSON)</summary>
+  <textarea id="jsontext" readonly spellcheck="false" wrap="off" aria-label="The bounding boxes and the minimum sphere of the model as JSON"></textarea>
   <button id="copy" type="button">Copy JSON</button><label title="Adds the vertices and the faces of the convex hull to the JSON."><input type="checkbox" id="cb-jsonhull"> with the convex hull</label><span id="copied" class="dim" role="status"></span>
 </details>
 <div id="prompt" hidden>
   <div class="big">Drop a glTF model here</div>
   <div>A <b>.glb</b> file, or a <b>.gltf</b> file together with its .bin and texture files (or the folder that has them).</div>
   <button id="choose" type="button">Choose files...</button>
-  <div class="dim">The page computes the convex hull of the model, its minimum volume oriented bounding box (OBB) and its axis-aligned bounding box (AABB) with <a href="https://github.com/juj/minobb">minobb</a>. The calculation runs in your browser: the model is not uploaded anywhere.</div>
+  <div class="dim">The page computes the convex hull of the model, its minimum volume oriented bounding box (OBB), its axis-aligned bounding box (AABB) and its minimum enclosing sphere with <a href="https://github.com/juj/minobb">minobb</a>. The calculation runs in your browser: the model is not uploaded anywhere.</div>
 </div>
 <div id="dropframe">Drop the model to compute its bounding boxes</div>
 <input type="file" id="file" multiple hidden accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2">
@@ -121,8 +122,8 @@ import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// The page shows one model, with its convex hull, its minimum volume OBB and its AABB drawn over it, and
-// the numbers of these as JSON. The model comes from one of two places:
+// The page shows one model, with its convex hull, its minimum volume OBB, its AABB and its minimum enclosing
+// sphere drawn over it, and the numbers of these as JSON. The model comes from one of two places:
 //
 // - view.html?url=<model.glb> loads the model of the URL. If there is a <model>.json next to it (the output
 //   of the command line tool minobb_glb, see calculate_obb.py), the hull and the boxes are taken from it.
@@ -321,6 +322,76 @@ function drawAABB(aabb) {
   return group;
 }
 
+// A round dot with a dark rim, as the picture of a point marker.
+let dotTexture = null;
+function dot() {
+  if (!dotTexture) {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    const g = canvas.getContext('2d');
+    g.beginPath();
+    g.arc(32, 32, 26, 0, 2 * Math.PI);
+    g.fillStyle = '#fff';
+    g.fill();
+    g.lineWidth = 8;
+    g.strokeStyle = '#000';
+    g.stroke();
+    dotTexture = new THREE.CanvasTexture(canvas);
+    dotTexture.colorSpace = THREE.SRGBColorSpace;
+  }
+  return dotTexture;
+}
+
+// Draws the minimum enclosing sphere of the minobb_glb JSON: a translucent ball with three great circles
+// on it, and what defines it: its support points (the two to four points of the model that it passes
+// through) as dots, each with its radius drawn from the center. The dots and the radii show through the model.
+function drawSphere(sphere) {
+  const COLOR = 0x55e055;
+  const group = new THREE.Group();
+  const center = new THREE.Vector3(...sphere.center), r = sphere.radius;
+
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(r, 64, 32), new THREE.MeshBasicMaterial({
+    color: COLOR, transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide
+  }));
+  ball.position.copy(center);
+  group.add(ball);
+
+  const circle = [];
+  for (let i = 0; i <= 128; ++i) circle.push(r * Math.cos(i / 128 * 2 * Math.PI), r * Math.sin(i / 128 * 2 * Math.PI), 0);
+  const circleGeometry = new THREE.BufferGeometry();
+  circleGeometry.setAttribute('position', new THREE.Float32BufferAttribute(circle, 3));
+  const circleMaterial = new THREE.LineBasicMaterial({ color: COLOR, transparent: true, opacity: 0.6 });
+  for (const rotation of [[0, 0, 0], [Math.PI / 2, 0, 0], [0, Math.PI / 2, 0]]) {
+    const line = new THREE.Line(circleGeometry, circleMaterial);
+    line.position.copy(center);
+    line.rotation.set(...rotation);
+    group.add(line);
+  }
+
+  const support = (sphere.support || []).flat();
+  if (support.length) {
+    const radii = [];
+    for (let i = 0; i < support.length; i += 3) radii.push(...sphere.center, support[i], support[i + 1], support[i + 2]);
+    const radiiGeometry = new THREE.BufferGeometry();
+    radiiGeometry.setAttribute('position', new THREE.Float32BufferAttribute(radii, 3));
+    const lines = new THREE.LineSegments(radiiGeometry, new THREE.LineBasicMaterial({
+      color: COLOR, transparent: true, opacity: 0.9, depthTest: false }));
+    lines.renderOrder = 10;
+    group.add(lines);
+
+    const marker = (positions, size) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      const points = new THREE.Points(geometry, new THREE.PointsMaterial({
+        color: COLOR, map: dot(), size: size, sizeAttenuation: false, alphaTest: 0.5, depthTest: false }));
+      points.renderOrder = 11;
+      return points;
+    };
+    group.add(marker(support, 14), marker(sphere.center, 8));
+  }
+  return group;
+}
+
 // A volume as text: with three decimals, or if it is too small for those to show anything (under 0.001),
 // in scientific notation, like 0.503e-3.
 function formatVolume(v) {
@@ -367,13 +438,14 @@ let model = null;  // { name, label, object }
 let result = null; // { data, source }
 
 // Overlay groups, toggled by the checkboxes in the HUD panel. They live in overlayRoot.
-let overlayRoot = null, hullGroup = null, hullTriLines = null, obbGroup = null, aabbGroups = [];
+let overlayRoot = null, hullGroup = null, hullTriLines = null, obbGroup = null, aabbGroups = [], sphereGroup = null;
 
 const cbObject = document.getElementById('cb-object');
 const cbHull = document.getElementById('cb-hull');
 const cbHullTri = document.getElementById('cb-hulltri');
 const cbOBB = document.getElementById('cb-obb');
 const cbAABB = document.getElementById('cb-aabb');
+const cbSphere = document.getElementById('cb-sphere');
 const cbDark = document.getElementById('cb-dark');
 const cbJsonHull = document.getElementById('cb-jsonhull');
 const toleranceInput = document.getElementById('tolerance');
@@ -390,7 +462,7 @@ function savePrefs() {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
       object: cbObject.checked,
       hull: cbHull.checked, hulltri: cbHullTri.checked,
-      obb: cbOBB.checked, aabb: cbAABB.checked,
+      obb: cbOBB.checked, aabb: cbAABB.checked, sphere: cbSphere.checked,
       dark: cbDark.checked, jsonhull: cbJsonHull.checked
     }));
   } catch (e) { /* storage unavailable (private mode etc.): ignore */ }
@@ -402,6 +474,7 @@ try {
   if (typeof prefs.hulltri === 'boolean') cbHullTri.checked = prefs.hulltri;
   if (typeof prefs.obb === 'boolean') cbOBB.checked = prefs.obb;
   if (typeof prefs.aabb === 'boolean') cbAABB.checked = prefs.aabb;
+  if (typeof prefs.sphere === 'boolean') cbSphere.checked = prefs.sphere;
   if (typeof prefs.dark === 'boolean') cbDark.checked = prefs.dark;
   if (typeof prefs.jsonhull === 'boolean') cbJsonHull.checked = prefs.jsonhull;
 } catch (e) { /* corrupted/absent prefs: keep defaults */ }
@@ -424,6 +497,7 @@ cbAABB.addEventListener('change', () => {
   for (const g of aabbGroups) g.visible = cbAABB.checked;
   savePrefs();
 });
+cbSphere.addEventListener('change', () => { if (sphereGroup) sphereGroup.visible = cbSphere.checked; savePrefs(); });
 // Disables a checkbox when the thing that it shows does not exist.
 function bindCheckbox(cb, label, groupExists) {
   cb.disabled = !groupExists;
@@ -435,6 +509,7 @@ function bindCheckboxes() {
   bindCheckbox(cbHullTri, document.getElementById('lbl-hulltri'), !!hullTriLines);
   bindCheckbox(cbOBB, document.getElementById('lbl-obb'), !!obbGroup);
   bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), aabbGroups.length > 0);
+  bindCheckbox(cbSphere, document.getElementById('lbl-sphere'), !!sphereGroup);
 }
 
 // Frees what the objects under `root` hold on the GPU.
@@ -458,7 +533,7 @@ function removeOverlays() {
     scene.remove(overlayRoot);
     disposeObject(overlayRoot);
   }
-  overlayRoot = hullGroup = hullTriLines = obbGroup = null;
+  overlayRoot = hullGroup = hullTriLines = obbGroup = sphereGroup = null;
   aabbGroups = [];
   result = null;
   jsonPanel.hidden = true;
@@ -718,6 +793,11 @@ function showResult(data, source) {
     parent.add(g);
     aabbGroups.push(g);
   }
+  if (data.sphere && !data.sphere.degenerate && data.sphere.radius >= 0) {
+    sphereGroup = drawSphere(data.sphere);
+    sphereGroup.visible = cbSphere.checked;
+    parent.add(sphereGroup);
+  }
   bindCheckboxes();
 
   let stats = 'boxes: ' + source +
@@ -725,7 +805,8 @@ function showResult(data, source) {
               `hull: ${data.hull ? data.hull.vertices.length + 'v / ' + data.hull.faces.length + 'f' : '-'}  ` +
               (obbOk ? 'obb: yes' : 'obb: no');
   if (data.timing)
-    stats += `\ntime: hull ${formatTime(data.timing.hull_sec)}, obb ${formatTime(data.timing.obb_sec)}`;
+    stats += `\ntime: hull ${formatTime(data.timing.hull_sec)}, obb ${formatTime(data.timing.obb_sec)}` +
+             (data.timing.sphere_sec !== undefined ? `, sphere ${formatTime(data.timing.sphere_sec)}` : '');
   const vols = [];
   if (data.hull && data.hull.vertices && data.hull.faces)
     vols.push(['convex hull', hullVolume(data.hull)]);
@@ -735,6 +816,8 @@ function showResult(data, source) {
     vols.push(['aabb (hull)', data.aabb_hull.volume]);
   if (data.obb && data.obb.volume !== undefined)
     vols.push(['obb', data.obb.volume]);
+  if (data.sphere && data.sphere.volume !== undefined)
+    vols.push(['min sphere', data.sphere.volume]);
   if (vols.length) {
     stats += '\nvolume:';
     for (const [name, v] of vols)
@@ -767,12 +850,12 @@ function formatJSON(value, indent = '') {
   return JSON.stringify(value);
 }
 
-// The JSON document of the results. It has what the JSON of minobb_glb has, the boxes first. Of the convex
+// The JSON document of the results. It has what the JSON of minobb_glb has, the boxes and the sphere first. Of the convex
 // hull it has the size and the volume, and only if `withHull` is set, also the vertices and the faces: a
 // hull can have hundreds of thousands of them.
 function resultDocument(withHull) {
-  const { hull, obb, aabb_vertices, aabb_hull, ...rest } = result.data;
-  const doc = { file: model.name, obb, aabb_vertices, aabb_hull };
+  const { hull, obb, sphere, aabb_vertices, aabb_hull, ...rest } = result.data;
+  const doc = { file: model.name, obb, sphere, aabb_vertices, aabb_hull };
   if (hull && hull.vertices && hull.faces) {
     doc.hull = {
       degenerate: hull.degenerate,

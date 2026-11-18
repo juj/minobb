@@ -5,8 +5,10 @@ against the number of hull vertices), and below them a table of the files with
 links to view.html?url=<relative path>. A point of a plot opens the same link.
 The table can be sorted by any of its columns, by clicking the column header.
 One of them is the volume of the OBB as a fraction of that of the axis-aligned
-box, which finds the models that the OBB fits much better. Each plot also has
-the curve c n^p (ln n)^q that fits its times the best, see fit_curves().
+box, which finds the models that the OBB fits much better. The table also has
+the time of the minimum enclosing sphere (minsphere() on the input vertices),
+and the volume of the sphere as a multiple of that of the OBB. Each plot also
+has the curve c n^p (ln n)^q that fits its times the best, see fit_curves().
 
 Also writes site/results.html: the same page without the links, for
 publishing. (The models themselves are not part of the repository, so on a
@@ -36,7 +38,9 @@ def load_entry(p: str):
     vertices, the hull and OBB times in seconds (no OBB time if minobb()
     returned no box), whether the hull is flat, and the volume of the OBB as a
     fraction of that of the axis-aligned box (None if there is no such thing:
-    no box, or a flat one)."""
+    no box, or a flat one). Also the time of the minimum enclosing sphere, and
+    the volume of the sphere as a multiple of that of the OBB (None if the
+    .json is from before the sphere was computed, or the box is flat)."""
     path = os.path.splitext(p)[0] + ".json"
     if not os.path.exists(path):
         return None
@@ -47,6 +51,9 @@ def load_entry(p: str):
         no_box = bool(data["obb"]["degenerate"]) and len(hull["vertices"]) > 0
         obb_volume = float(data["obb"].get("volume", 0.0))
         aabb_volume = float(data.get("aabb_hull", {}).get("volume", 0.0))
+        sphere = data.get("sphere", {})
+        sphere_volume = float(sphere.get("volume", 0.0))
+        sphere_sec = timing.get("sphere_sec")
         return {
             "ratio": obb_volume / aabb_volume if obb_volume > 0 and aabb_volume > 0 and math.isfinite(obb_volume / aabb_volume) else None,
             "points": int(data["vertices"]),
@@ -54,6 +61,8 @@ def load_entry(p: str):
             "flat": bool(hull["degenerate"]),
             "hull_sec": float(timing["hull_sec"]),
             "obb_sec": None if no_box else float(timing["obb_sec"]),
+            "sphere_sec": None if sphere_sec is None or sphere.get("degenerate", True) else float(sphere_sec),
+            "sphere_ratio": sphere_volume / obb_volume if sphere_volume > 0 and obb_volume > 0 and math.isfinite(sphere_volume / obb_volume) else None,
         }
     except (OSError, ValueError, TypeError, KeyError):
         return None
@@ -64,6 +73,12 @@ def format_time(seconds: float) -> str:
         if seconds >= scale:
             return f"{seconds / scale:.3g} {unit}" if seconds < 1000 else f"{seconds:.0f} s"
     return f"{seconds * 1e9:.3g} ns"
+
+
+def format_ratio(ratio: float) -> str:
+    """A ratio of volumes as text, like 3.34x. (The sphere of a nearly flat box is many orders of magnitude
+    larger than the box: such ratios are written like 4.2e+23x.)"""
+    return f"{ratio:.2f}x" if ratio < 10000 else f"{ratio:.1e}x"
 
 
 # The curves that are fitted to the times: c n^p (ln n)^q, for these exponents p and q.
@@ -147,7 +162,7 @@ def write_page(files, out_file: str, links: bool) -> None:
         link = f'<td>{anchor}</td>' \
                f'<td class="dim">{html.escape(os.path.basename(os.path.dirname(p)))}</td>'
         if e is None:
-            table.append(f'    <tr>{link}<td class="dim" colspan="5">not computed</td></tr>')
+            table.append(f'    <tr>{link}<td class="dim" colspan="7">not computed</td></tr>')
             continue
         if e["obb_sec"] is None:
             no_box.append(f'{anchor} ({e["hull"]:,} hull vertices)')
@@ -155,13 +170,16 @@ def write_page(files, out_file: str, links: bool) -> None:
         obb = '<td class="dim">none</td>' if e["obb_sec"] is None \
             else f'<td>{format_time(e["obb_sec"])}</td>'
         ratio = '<td class="dim">–</td>' if e["ratio"] is None else f'<td>{e["ratio"]:.2f}x</td>'
+        sphere = '<td class="dim">–</td>' if e["sphere_sec"] is None else f'<td>{format_time(e["sphere_sec"])}</td>'
+        sphere_ratio = '<td class="dim">–</td>' if e["sphere_ratio"] is None else f'<td>{format_ratio(e["sphere_ratio"])}</td>'
         table.append(f'    <tr data-i="{len(data)}">{link}<td>{e["points"]:,}</td><td>{e["hull"]:,}{flat}</td>'
-                     f'<td>{format_time(e["hull_sec"])}</td>{obb}{ratio}</tr>')
+                     f'<td>{format_time(e["hull_sec"])}</td>{obb}{ratio}{sphere}{sphere_ratio}</tr>')
         data.append([href, name, e["points"], e["hull"], e["hull_sec"], e["obb_sec"], int(e["flat"]),
-                     None if e["ratio"] is None else round(e["ratio"], 4)])
+                     None if e["ratio"] is None else round(e["ratio"], 4), e["sphere_sec"],
+                     None if e["sphere_ratio"] is None else float(f'{e["sphere_ratio"]:.4g}')])
 
     if not table:
-        table.append('    <tr><td class="dim" colspan="7">no .glb files found under ' + html.escape(GLB_DIR) + '</td></tr>')
+        table.append('    <tr><td class="dim" colspan="9">no .glb files found under ' + html.escape(GLB_DIR) + '</td></tr>')
     # The curves: the hull times by the number of input vertices; and the OBB times by the number of hull
     # vertices, of the solid hulls (a flat hull gets its box by another, two-dimensional method).
     hull_fits, hull_count = fit_curves([(row[2], row[4]) for row in data])
@@ -299,6 +317,8 @@ PAGE = r"""<!DOCTYPE html>
     <th><button type="button" title="Sort by convex hull time">Hull time</button></th>
     <th><button type="button" title="Sort by minimum OBB time">OBB time</button></th>
     <th><button type="button" title="Sort by the volume of the OBB as a fraction of the volume of the axis-aligned bounding box">OBB/AABB</button></th>
+    <th><button type="button" title="Sort by minimum enclosing sphere time: minsphere() on the input vertices, which does not need the convex hull">Sphere time</button></th>
+    <th><button type="button" title="Sort by the volume of the minimum enclosing sphere as a multiple of the volume of the OBB">Sphere/OBB</button></th>
   </tr></thead>
   <tbody>
 @ROWS@
@@ -310,9 +330,10 @@ PAGE = r"""<!DOCTYPE html>
 (function () {
   'use strict';
   // One row per file: link, name, input vertices, hull vertices, hull seconds, OBB seconds (null: no box), flat
-  // hull, and the volume of the OBB as a fraction of that of the axis-aligned box (null: no such thing).
+  // hull, the volume of the OBB as a fraction of that of the axis-aligned box (null: no such thing), minimum
+  // sphere seconds, and the volume of the sphere as a multiple of that of the OBB (null: no sphere, or a flat box).
   const rows = JSON.parse(document.getElementById('glb-data').textContent);
-  const HREF = 0, NAME = 1, POINTS = 2, HULL = 3, HULL_SEC = 4, OBB_SEC = 5, FLAT = 6, RATIO = 7;
+  const HREF = 0, NAME = 1, POINTS = 2, HULL = 3, HULL_SEC = 4, OBB_SEC = 5, FLAT = 6, RATIO = 7, SPHERE_SEC = 8, SPHERE_RATIO = 9;
   // The curves that fit the times of the two plots the best: c n^p (ln n)^q each.
   const fits = JSON.parse(document.getElementById('glb-fits').textContent);
 
@@ -570,6 +591,8 @@ PAGE = r"""<!DOCTYPE html>
       if (spec.y !== HULL_SEC) pair('hull time', fullTime(r[HULL_SEC]));
       if (spec.y !== OBB_SEC) pair('OBB time', r[OBB_SEC] === null ? 'none' : fullTime(r[OBB_SEC]));
       if (r[RATIO] !== null) pair('OBB / AABB volume', r[RATIO].toFixed(2) + 'x');
+      if (r[SPHERE_SEC] !== null) pair('sphere time', fullTime(r[SPHERE_SEC]));
+      if (r[SPHERE_RATIO] !== null) pair('sphere / OBB volume', (r[SPHERE_RATIO] < 10000 ? r[SPHERE_RATIO].toFixed(2) : r[SPHERE_RATIO].toExponential(1)) + 'x');
       add(tip, 'div', '', r[NAME]);
       if (r[HREF]) add(tip, 'div', 'hint', 'click to open in the viewer');
       let x = p[0] + 14, y = p[1] + 14;
@@ -684,7 +707,7 @@ PAGE = r"""<!DOCTYPE html>
   const generated = Array.from(body.rows), headers = Array.from(document.querySelectorAll('#files thead th'));
   const text = column => tr => tr.cells[column].textContent.toLowerCase();
   const number = field => tr => tr.dataset.i === undefined ? null : rows[tr.dataset.i][field];
-  const sortKeys = [text(0), text(1), number(POINTS), number(HULL), number(HULL_SEC), number(OBB_SEC), number(RATIO)];
+  const sortKeys = [text(0), text(1), number(POINTS), number(HULL), number(HULL_SEC), number(OBB_SEC), number(RATIO), number(SPHERE_SEC), number(SPHERE_RATIO)];
   function sortBy(column, descending) {
     const keys = new Map(generated.map(tr => [tr, sortKeys[column](tr)]));
     const sorted = generated.slice().sort((a, b) => {

@@ -6,8 +6,8 @@ Test sources live under test/ (see that directory). All temporary build
 artifacts (object files, executables) are compiled under tmp/ and are
 recreated from scratch on every run.
 
-No external dependencies: only minobb, convex_hull and glb.{h,cpp} from
-this repository, a C++ compiler.
+No external dependencies: only minobb, minsphere, convex_hull and
+glb.{h,cpp} from this repository, a C++ compiler.
 
 Usage:  python test.py
 """
@@ -151,6 +151,7 @@ def main():
     t_glb()
     t_script("convex_hull", "test_convex_hull.py", r"\d+/\d+ hulls passed.*")
     t_script("minobb", "test_minobb.py", r"\d+/\d+ boxes passed.*")
+    t_script("minsphere", "test_minsphere.py", r"\d+/\d+ spheres passed.*")
 
     nfail = sum(1 for _, ok, _, _ in results if not ok)
     log(f"\n{len(results) - nfail}/{len(results)} tests passed")

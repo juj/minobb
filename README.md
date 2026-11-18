@@ -51,13 +51,13 @@ The box is returned as its center `pos`, its half extents `r` and its three orth
 If you would like to have a command line tool that computes the minimum volume OBB of a glTF file, build `minobb_glb`:
 
 ```
-c++ -O3 -std=c++17 -I. -o minobb_glb minobb.cpp convex_hull.cpp glb.cpp test/minobb_glb.cpp
+c++ -O3 -std=c++17 -I. -o minobb_glb minobb.cpp minsphere.cpp convex_hull.cpp glb.cpp test/minobb_glb.cpp
 minobb_glb model.glb > model.json
 ```
 
 (Or with CMake: `cmake -B build` and `cmake --build build --config Release`.)
 
-This generates a JSON file with the convex hull (vertices and faces), the OBB (center, half extents, axes and volume), the axis-aligned bounding boxes, and the times that the hull and the OBB took to compute. The tool reads `.glb` files, and `.gltf` files with embedded or external buffers. It takes the vertex positions of all the meshes of the default scene, in world space; skinned meshes are posed by their joints as the file has them. Animations and morph targets are not applied, and Draco or meshopt compressed and sparse position data is not supported.
+This generates a JSON file with the convex hull (vertices and faces), the OBB (center, half extents, axes and volume), the minimum enclosing sphere (center, radius, volume and the points that it passes through), the axis-aligned bounding boxes, and the times that the hull, the OBB and the sphere took to compute. The tool reads `.glb` files, and `.gltf` files with embedded or external buffers. It takes the vertex positions of all the meshes of the default scene, in world space; skinned meshes are posed by their joints as the file has them. Animations and morph targets are not applied, and Draco or meshopt compressed and sparse position data is not supported.
 
 # The Algorithm
 
@@ -112,13 +112,14 @@ to check through the whole test suite. This includes:
 
 - the examples of the paper (`test/testobb.cpp`),
 - two regression tests (`test/repro_minimal.cpp`, `test/contcheck.cpp`), and
-- the three tests below, which go through all models that are downloaded under `test/glb`.
+- the four tests below, which go through all models that are downloaded under `test/glb`.
 
-The three main tests can also be run on their own:
+The four main tests can also be run on their own:
 
 - `python test_convex_hull.py` verifies the convex hull of every model. A report is output to `convex_hull_report/`.
 - `python test_minobb.py` checks computed OBBs against an exhaustive reference search. The exhaustive search is slow, so results are cached next to the models (`<name>.gt.json`) to avoid recomputation later.
-- `python test/test_glb.py` recomputes the hull and the OBB of every model and compares their volumes with the stored results (`<name>.json`).
+- `python test_minsphere.py` checks that the minimum enclosing sphere of every model contains the model, and proves with a lower bound that no smaller sphere does.
+- `python test/test_glb.py` recomputes the hull, the OBB and the sphere of every model and compares them with the stored results (`<name>.json`).
 
 The models are not part of the repository. To get them:
 
@@ -134,3 +135,30 @@ To browse downloaded models with their computed hulls and boxes, serve the repos
 # Extras
 
 In addition to calculating minimum OBBs, this repository contains two other bonus features: calculating convex hulls (convex_hull.h/.cpp), and calculating minimum enclosing spheres (minsphere.h/.cpp).
+
+## Minimum Enclosing Sphere
+
+Copy the files `minsphere.h`, `minsphere.cpp` and `convex_hull.h` (for the vector type) to your project. Then
+
+```c++
+#include "minsphere.h"
+#include <stdio.h>
+
+int main()
+{
+	float points[] = { 0,0,0,  4,1,0,  1,3,0,  2,2,5,  5,4,1,  0,1,4 };
+	int strideBytes = 3 * sizeof(float);
+	int numPoints = sizeof(points) / strideBytes;
+
+	Sphere sphere = minsphere(points, numPoints, strideBytes);
+
+	printf("center: %g %g %g\n", sphere.pos.x, sphere.pos.y, sphere.pos.z);
+	printf("radius: %g\n", sphere.r);
+	for (int i = 0; i < sphere.numSupport; ++i)
+		printf("passes through point %d\n", sphere.support[i]);
+}
+```
+
+`minsphere()` takes a list of points like above, or a `Hull3` from `convex_hull()`: the sphere is the same. The returned sphere contains all the points, and its radius is the smallest possible to the precision of floats. `support` lists the two to four points that the sphere passes through and that define it.
+
+The implementation is adapted from `Sphere::OptimalEnclosingSphere()` of [MathGeoLib](https://github.com/juj/MathGeoLib), made robust (it has no tolerances, and any input is fine: points on a line, in a plane or all on one sphere, of any scale) and fast: it does not need the convex hull, and reads the points of a typical model about twice. A model of 15 million vertices takes 30 milliseconds on one thread of a desktop CPU, and the 6,933 test models (1.15 billion vertices) take 3 seconds in all, where their convex hulls take 75.

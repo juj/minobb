@@ -1,14 +1,15 @@
 // web/calculator.cpp
 //
 // The WebAssembly side of site/calculator.js, which site/view.html uses to
-// compute the convex hull, the minimum-volume OBB and the axis-aligned
-// bounding box of a model in the browser. Built with Emscripten by
+// compute the convex hull, the minimum-volume OBB, the minimum enclosing
+// sphere and the axis-aligned bounding box of a model in the browser. Built with Emscripten by
 // build_viewer.py; web/calculator_api.js is the JavaScript side.
 //
 // The results are the same numbers that test/minobb_glb.cpp prints as JSON,
 // computed with the same float arithmetic.
 
 #include "minobb.h"
+#include "minsphere.h"
 #include <emscripten.h>
 #include <algorithm>
 #include <cmath>
@@ -29,7 +30,13 @@ enum
 	R_AABB_VERTICES,                  // 13 numbers: min, max, center, size (3 each), volume.
 	R_AABB_HULL = R_AABB_VERTICES + 13, // The same of the hull vertices.
 	R_OBB = R_AABB_HULL + 13,         // 19 numbers: center, half extents, size, axes (3 x 3), volume.
-	R_COUNT = R_OBB + 19
+	R_SPHERE_SEC = R_OBB + 19,        // The time of minsphere() of the points,
+	R_SPHERE_HULL_SEC,                // and of the hull.
+	R_SPHERE_DEGENERATE,              // 1 if minsphere() returned no sphere (there were no finite points).
+	R_SPHERE,                         // 5 numbers: center, radius, volume.
+	R_SPHERE_NUM_SUPPORT = R_SPHERE + 5, // The number of the support points of the sphere,
+	R_SPHERE_SUPPORT,                 // and the points: 3 numbers each, room for 4.
+	R_COUNT = R_SPHERE_SUPPORT + 12
 };
 
 static double result[R_COUNT];
@@ -76,7 +83,8 @@ static void WriteAABB(double *out, const vec3 &mn, const vec3 &mx)
 extern "C" {
 
 // Computes the convex hull of the `numPoints` packed xyz float triples at
-// `points`, and its minimum-volume OBB to within `tolerance` (see minobb.h).
+// `points`, its minimum-volume OBB to within `tolerance` (see minobb.h), and
+// the minimum enclosing sphere of the points.
 // Returns an array of R_COUNT doubles, which stays valid until the next call.
 EMSCRIPTEN_KEEPALIVE const double *calculator_compute(const float *points, int numPoints, float tolerance)
 {
@@ -136,6 +144,24 @@ EMSCRIPTEN_KEEPALIVE const double *calculator_compute(const float *points, int n
 			obb.Volume()
 		};
 		std::copy(values, values + 19, o);
+	}
+
+	// The sphere is computed from the points, which does not need the hull. The
+	// time that the same sphere takes from the vertices of the hull is measured
+	// too, like test/minobb_glb.cpp does.
+	Sphere sphere, hullSphere;
+	result[R_SPHERE_SEC] = TimeCall([&] { sphere = minsphere(points, numPoints, 3 * sizeof(float)); });
+	result[R_SPHERE_HULL_SEC] = TimeCall([&] { hullSphere = minsphere(hull); });
+	std::fill(result + R_SPHERE_DEGENERATE, result + R_COUNT, 0.0);
+	result[R_SPHERE_DEGENERATE] = sphere.IsDegenerate() ? 1 : 0;
+	if (!sphere.IsDegenerate())
+	{
+		const float values[5] = { sphere.pos.x, sphere.pos.y, sphere.pos.z, sphere.r, sphere.Volume() };
+		std::copy(values, values + 5, result + R_SPHERE);
+		result[R_SPHERE_NUM_SUPPORT] = sphere.numSupport;
+		for (int i = 0; i < sphere.numSupport; ++i)
+			for (int j = 0; j < 3; ++j)
+				result[R_SPHERE_SUPPORT + 3 * i + j] = points[3 * (size_t)sphere.support[i] + j];
 	}
 	return result;
 }

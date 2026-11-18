@@ -24,14 +24,16 @@
 //   {
 //     vertices: 8,                       // The number of points.
 //     tolerance: 0.0015,
-//     timing: { hull_sec, obb_sec },
+//     timing: { hull_sec, obb_sec, sphere_sec, sphere_hull_sec },
 //     hull: { degenerate: false, vertices: [[x, y, z], ...], faces: [[i, j, k, ...], ...] },
 //     aabb_vertices: { min, max, center, size, volume },   // The box of the points,
 //     aabb_hull: { min, max, center, size, volume },       // and of the hull vertices.
-//     obb: { degenerate: false, center, half_extents, size, axes: [[x, y, z] x 3], volume }
+//     obb: { degenerate: false, center, half_extents, size, axes: [[x, y, z] x 3], volume },
+//     sphere: { degenerate: false, center, radius, volume, support: [[x, y, z], ...] }
 //   }
 //
-// (obb is { degenerate: true } if there was no finite point to compute a box of.)
+// sphere is the minimum enclosing sphere of the points, and its support is the two to four points that it
+// passes through. (obb and sphere are { degenerate: true } if there was no finite point to compute them of.)
 
 var MinobbCalculator = (function () {
   'use strict';
@@ -42,7 +44,8 @@ var MinobbCalculator = (function () {
   // with the enum of web/calculator.cpp.
   var R_NUM_HULL_VERTICES = 0, R_NUM_HULL_FACES = 1, R_NUM_FACE_INTS = 2, R_HULL_DEGENERATE = 3,
       R_OBB_DEGENERATE = 4, R_HULL_SEC = 5, R_OBB_SEC = 6, R_AABB_VERTICES = 7, R_AABB_HULL = 20,
-      R_OBB = 33, R_COUNT = 52;
+      R_OBB = 33, R_SPHERE_SEC = 52, R_SPHERE_HULL_SEC = 53, R_SPHERE_DEGENERATE = 54, R_SPHERE = 55,
+      R_SPHERE_NUM_SUPPORT = 60, R_SPHERE_SUPPORT = 61, R_COUNT = 73;
 
   // A wasm memory that has grown never shrinks. A module that a large model
   // has grown past this size is dropped after the calculation, and the next
@@ -83,10 +86,15 @@ var MinobbCalculator = (function () {
     for (var j = 0; j < numFaceInts; j += F[j] + 1) faces.push(Array.from(F.subarray(j + 1, j + 1 + F[j])));
 
     var o = R_OBB;
+    var support = [];
+    for (var k = 0; k < R[R_SPHERE_NUM_SUPPORT]; ++k) support.push(vec3(R, R_SPHERE_SUPPORT + 3 * k));
     return {
       vertices: numPoints,
       tolerance: tolerance,
-      timing: { hull_sec: +R[R_HULL_SEC].toFixed(9), obb_sec: +R[R_OBB_SEC].toFixed(9) },
+      timing: {
+        hull_sec: +R[R_HULL_SEC].toFixed(9), obb_sec: +R[R_OBB_SEC].toFixed(9),
+        sphere_sec: +R[R_SPHERE_SEC].toFixed(9), sphere_hull_sec: +R[R_SPHERE_HULL_SEC].toFixed(9)
+      },
       hull: { degenerate: !!R[R_HULL_DEGENERATE], vertices: vertices, faces: faces },
       aabb_vertices: aabb(R, R_AABB_VERTICES),
       aabb_hull: aabb(R, R_AABB_HULL),
@@ -97,6 +105,13 @@ var MinobbCalculator = (function () {
         size: vec3(R, o + 6),
         axes: [vec3(R, o + 9), vec3(R, o + 12), vec3(R, o + 15)],
         volume: f32(R[o + 18])
+      },
+      sphere: R[R_SPHERE_DEGENERATE] ? { degenerate: true } : {
+        degenerate: false,
+        center: vec3(R, R_SPHERE),
+        radius: f32(R[R_SPHERE + 3]),
+        volume: f32(R[R_SPHERE + 4]),
+        support: support
       }
     };
   }

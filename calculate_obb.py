@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Builds test/minobb_glb.exe and recomputes the sibling .json (convex hull,
-minimum-volume OBB, AABBs, timing) for every .glb under test/glb, in parallel
-via subprocesses.
+minimum-volume OBB, minimum enclosing sphere, AABBs, timing) for every .glb
+under test/glb, in parallel via subprocesses.
 
 Each <name>.glb produces:
-  <name>.json     - the JSON document (hull, obb, aabb_vertices, aabb_hull, timing)
+  <name>.json     - the JSON document (hull, obb, sphere, aabb_vertices, aabb_hull, timing)
   <name>.json.err - the tool's stderr info lines
 
 The hull/OBB are computed over ALL world-space points (no subsampling). The
@@ -34,7 +34,7 @@ EXE = os.path.join(REPO_ROOT, "test", "minobb_glb.exe")
 BUILD_CMD = [
     "clang++", "-O3", "-std=c++17", "-I.",
     "-o", os.path.join("test", "minobb_glb.exe"),
-    "minobb.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp"),
+    "minobb.cpp", "minsphere.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "minobb_glb.cpp"),
 ]
 
 
