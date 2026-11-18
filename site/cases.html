@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minimum OBB contact categories A–D: exemplar polyhedra</title>
+<style>
+:root{color-scheme:light;--bg:#fcfcfb;--panel:rgba(243,242,238,.88);--border:#dddcd4;--text:#0b0b0b;--text2:#52514e;
+--poly:#2a78d6;--hit:#d95926;--box:#6b6a66;--touch:#199e70}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#1a1a19;--panel:rgba(36,36,34,.88);--border:#3a3a36;--text:#f0efec;--text2:#c3c2b7;
+--poly:#3987e5;--hit:#eb6834;--box:#a3a29a;--touch:#1baf7a}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,"Segoe UI",sans-serif}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+canvas.drag{cursor:grabbing}
+#top{position:fixed;top:12px;left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
+#tabs{display:flex;gap:4px;pointer-events:auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:4px}
+#tabs button{font:inherit;font-weight:600;min-width:44px;padding:5px 12px;border:0;border-radius:7px;background:none;color:var(--text2);cursor:pointer}
+#tabs button:hover{color:var(--text)}
+#tabs button[aria-selected=true]{background:var(--poly);color:#fff}
+#title{font-size:1.15em;font-weight:600;text-align:center;padding:0 16px;text-shadow:0 0 6px var(--bg),0 0 6px var(--bg)}
+#info{position:fixed;left:12px;bottom:12px;max-width:min(430px,calc(100vw - 24px));background:var(--panel);border:1px solid var(--border);
+border-radius:10px;padding:10px 14px;font-size:.9em;backdrop-filter:blur(4px)}
+#info h2{font-size:.78em;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin:.7em 0 .15em;font-weight:600}
+#info h2:first-child{margin-top:0}
+#info p{margin:.2em 0}
+#info .mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:.95em}
+#info .sw{display:inline-block;width:14px;height:4px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--hit)}
+#info .dot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 9px 0 3px;border:2px solid var(--touch)}
+#note{color:var(--text2)}
+#hint{position:fixed;right:12px;bottom:12px;color:var(--text2);font-size:.8em;text-align:right;pointer-events:none}
+#toggle{position:fixed;left:12px;top:12px;font:inherit;font-size:.85em;padding:4px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text2);cursor:pointer}
+</style></head><body>
+<canvas id="cv" aria-label="3D view of the polyhedron and its minimum bounding box"></canvas>
+<button id="toggle" title="Show or hide the details panel">Details</button>
+<div id="top"><div id="tabs" role="tablist"></div><div id="title"></div></div>
+<div id="info"></div>
+<div id="hint">drag to rotate · click toggles spin · scroll to zoom · space pauses · ← → switch case</div>
+<script>
+// Exact-candidate minimum OBB for small convex polyhedra with integer vertices, plus contact classification.
+
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const len = a => Math.hypot(a[0], a[1], a[2]);
+const norm = a => { const l = len(a); return [a[0] / l, a[1] / l, a[2] / l]; };
+const gcd = (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { [a, b] = [b, a % b]; } return a; };
+const det3 = (a, b, c) => dot(a, cross(b, c));
+
+// Brute-force hull of integer points. Returns null unless every point is a hull vertex and the set is 3D.
+function hull(P) {
+  const n = P.length, planes = new Map();
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) {
+    let nr = cross(sub(P[j], P[i]), sub(P[k], P[i]));
+    if (!nr[0] && !nr[1] && !nr[2]) return null; // three collinear points
+    let d = dot(nr, P[i]), pos = 0, neg = 0;
+    for (let l = 0; l < n; l++) { const s = dot(nr, P[l]) - d; if (s > 0) pos++; else if (s < 0) neg++; }
+    if (pos && neg) continue;
+    if (!pos && !neg) return null; // coplanar
+    if (pos) { nr = [-nr[0], -nr[1], -nr[2]]; d = -d; }
+    const g = gcd(gcd(nr[0], nr[1]), gcd(nr[2], d)) || 1;
+    nr = nr.map(x => x / g); d /= g;
+    const key = nr.join(',') + ',' + d;
+    if (!planes.has(key)) {
+      const on = []; for (let l = 0; l < n; l++) if (dot(nr, P[l]) === d) on.push(l);
+      planes.set(key, { n: nr, d, on });
+    }
+  }
+  const faces = [...planes.values()];
+  if (faces.length < 4) return null;
+  for (let v = 0; v < n; v++) {
+    const fs = faces.filter(f => f.on.includes(v));
+    let ok = false;
+    for (let a = 0; a < fs.length && !ok; a++) for (let b = a + 1; b < fs.length && !ok; b++) for (let c = b + 1; c < fs.length; c++)
+      if (det3(fs[a].n, fs[b].n, fs[c].n) !== 0) { ok = true; break; }
+    if (!ok) return null;
+  }
+  const edges = [];
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    let c = 0; for (const f of faces) if (f.on.includes(i) && f.on.includes(j)) c++;
+    if (c >= 2) edges.push([i, j]);
+  }
+  return { faces, edges };
+}
+
+function boxOf(P, R) {
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (const p of P) for (let i = 0; i < 3; i++) { const t = dot(R[i], p); if (t < mn[i]) mn[i] = t; if (t > mx[i]) mx[i] = t; }
+  return { R, mn, mx, vol: (mx[0] - mn[0]) * (mx[1] - mn[1]) * (mx[2] - mn[2]) };
+}
+const sameFrame = (A, B) => A.every(a => B.some(b => Math.abs(dot(a, b)) > 1 - 1e-9));
+
+// All candidate orientations: (axis from two edges) x (flush with a projected edge), and three edges on mutually adjacent faces.
+function candidates(P, H) {
+  const D = H.edges.map(([i, j]) => norm(sub(P[j], P[i]))), out = [], E = D.length;
+  for (let a = 0; a < E; a++) for (let b = a + 1; b < E; b++) {
+    const c = cross(D[a], D[b]); if (len(c) < 1e-9) continue;
+    const n = norm(c);
+    for (let e = 0; e < E; e++) {
+      const t = dot(D[e], n), u = [D[e][0] - t * n[0], D[e][1] - t * n[1], D[e][2] - t * n[2]];
+      if (len(u) < 1e-9) continue;
+      const un = norm(u); out.push([n, un, cross(n, un)]);
+    }
+  }
+  for (let a = 0; a < E; a++) {
+    const A = D[a], h = Math.abs(A[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0], p = norm(cross(A, h)), q = cross(A, p);
+    for (let b = a + 1; b < E; b++) for (let c = b + 1; c < E; c++) {
+      const X = dot(D[b], p), Y = dot(D[b], q), Z = dot(D[c], p), W = dot(D[c], q);
+      const Ac = (X * Z - Y * W) / 2, Bc = (X * W + Y * Z) / 2, Cc = dot(D[b], D[c]) - (X * Z + Y * W) / 2, Rr = Math.hypot(Ac, Bc);
+      if (Rr < 1e-12 || Math.abs(Cc) > Rr * (1 + 1e-12)) continue;
+      const base = Math.atan2(Bc, Ac), dl = Math.acos(Math.max(-1, Math.min(1, Cc / Rr)));
+      for (const s of [1, -1]) {
+        const th = (base + s * dl) / 2, n1 = [0, 1, 2].map(i => Math.cos(th) * p[i] + Math.sin(th) * q[i]);
+        const m = cross(D[b], n1); if (len(m) < 1e-9) continue;
+        const n2 = norm(m); out.push([n1, n2, cross(n1, n2)]);
+      }
+    }
+  }
+  return out;
+}
+
+// Returns {best, ties, second}: best box, number of distinct optimal frames, and volume of best distinct runner-up candidate.
+function minOBB(P, H) {
+  const boxes = candidates(P, H).map(R => boxOf(P, R)).sort((a, b) => a.vol - b.vol);
+  const best = boxes[0], distinct = [best];
+  let second = Infinity;
+  for (const b of boxes) {
+    if (distinct.some(d => sameFrame(d.R, b.R))) continue;
+    if (b.vol < best.vol * (1 + 1e-9)) distinct.push(b); else { second = b.vol; break; }
+  }
+  return { best, ties: distinct.length, second };
+}
+
+// Contacts of a box with the polyhedron. Box faces are numbered 2*axis + (0 for min side, 1 for max side).
+function contacts(P, H, box, tol = 1e-7) {
+  const on = [];
+  for (let i = 0; i < 3; i++) for (let s = 0; s < 2; s++) {
+    const lim = s ? box.mx[i] : box.mn[i];
+    on.push(P.map((p, k) => k).filter(k => Math.abs(dot(box.R[i], P[k]) - lim) < tol));
+  }
+  const ec = []; // [edgeIndex, boxFace]
+  H.edges.forEach(([i, j], e) => on.forEach((s, f) => { if (s.includes(i) && s.includes(j)) ec.push([e, f]); }));
+  const flushFaces = on.map((s, f) => s.length >= 3 ? f : -1).filter(f => f >= 0);
+  return { on, ec, flushFaces };
+}
+
+function classify(P, H, box) {
+  const C = contacts(P, H, box), ec = C.ec, edgesUsed = [...new Set(ec.map(c => c[0]))];
+  const axis = f => f >> 1;
+  let cat = 'other', minimal = false;
+  if (C.flushFaces.length) {
+    cat = 'C';
+    if (C.flushFaces.length === 1) {
+      const f = C.flushFaces[0], extra = ec.filter(c => c[1] !== f);
+      minimal = C.on[f].length === 3 && extra.length === 1;
+    }
+  } else {
+    const byEdge = e => ec.filter(c => c[0] === e).map(c => c[1]);
+    const boxEdge = edgesUsed.filter(e => byEdge(e).length >= 2);
+    if (boxEdge.length) {
+      cat = 'D';
+      if (ec.length === 3 && edgesUsed.length === 2) {
+        const other = ec.find(c => c[0] !== boxEdge[0])[1], fs = byEdge(boxEdge[0]);
+        minimal = fs.some(f => (f ^ 1) === other);
+      }
+    } else {
+      const fs = ec.map(c => c[1]), ax = fs.map(axis);
+      const hasA = [0, 1, 2].every(a => ax.includes(a));
+      const hasB = fs.some(f => fs.includes(f ^ 1)) && new Set(ax).size >= 2;
+      if (hasA && hasB) cat = 'AB'; else if (hasA) cat = 'A'; else if (hasB) cat = 'B';
+      minimal = ec.length === 3 && (cat === 'A' || cat === 'B');
+    }
+  }
+  return { cat, minimal, nContacts: ec.length, C };
+}
+
+
+
+// The exemplar polyhedra. Shared by verify.js and (inlined) by cases.html.
+const CASES = [
+  { id: 'A', title: 'Three edges on three mutually adjacent faces',
+    P: [[2,-2,-2],[-2,2,-2],[-2,-2,2],[1,1,1]],
+    note: 'A regular tetrahedron inscribed in the cube [-2,2]\u00b3 with one vertex pulled halfway to the centre. Its three remaining face-diagonal edges form an equilateral triangle; the pulled vertex touches nothing.' },
+  { id: 'B', title: 'Three edges on three faces, two of them opposite',
+    P: [[0,0,0],[3,3,0],[5,0,2],[1,2,2]],
+    note: 'Two skew edges on the bottom and top faces and a third edge joining them on the front face. A minimal-contact B box cannot have any symmetry, so this tetrahedron is necessarily lopsided.' },
+  { id: 'B*', title: 'Category B on a classic: the orthoscheme',
+    P: [[0,0,0],[1,0,0],[1,1,0],[1,1,1]],
+    note: 'The path tetrahedron that tiles the unit cube six ways. Its minimum box is not the cube (volume 1) but a tilted box of volume 2/3, flush with four edges on two pairs of opposite faces.' },
+  { id: 'C', title: 'A face and an edge',
+    P: [[-4,0,0],[4,0,0],[0,3,0],[0,1,1]],
+    note: 'An obtuse isosceles base (two 3-4-5 triangles back to back) lies flush on the bottom; its long edge is also flush with the front face. The low apex touches only the top.' },
+  { id: 'D', title: 'Two edges on three faces: an edge of the polyhedron on an edge of the box',
+    P: [[0,0,-10],[0,0,10],[8,1,0],[8,7,0],[4,8,0]],
+    note: 'A pole on the z-axis coincides with a box edge and so is flush with two faces at once. The far edge of the mid-height triangle is flush with the face opposite one of them.' },
+];
+
+
+</script>
+<script>
+'use strict';
+// ---------- per-case geometry, computed here in the page ----------
+function intDir(v) { // smallest integer vector parallel to v, if there is a small one
+  const m = Math.min(...v.map(Math.abs).filter(a => a > 1e-9));
+  for (let k = 1; k <= 6; k++) { const w = v.map(x => x / m * k); if (w.every(x => Math.abs(x - Math.round(x)) < 1e-7)) return w.map(x => Math.round(x) + 0); }
+  return null;
+}
+const num = x => { const r = Math.round(x * 1e4) / 1e4; return (Object.is(r, -0) ? 0 : r).toString().replace('-', '−'); };
+function linForm(n) { // "x − y + z"
+  let s = '';
+  n.forEach((c, i) => { if (Math.abs(c) < 1e-9) return; const a = Math.abs(c), t = (Math.abs(a - 1) < 1e-9 ? '' : num(a)) + 'xyz'[i];
+    s += s ? (c < 0 ? ' − ' : ' + ') + t : (c < 0 ? '−' : '') + t; });
+  return s;
+}
+function prepare(c) {
+  const P = c.P, H = hull(P), m = minOBB(P, H), box = m.best, k = classify(P, H, box);
+  const planes = []; // 6 box faces: {n (outward unit), label}
+  for (let i = 0; i < 3; i++) for (let s = 0; s < 2; s++) {
+    let d = intDir(box.R[i]), lim = s ? box.mx[i] : box.mn[i];
+    if (d) { lim *= len(d); if (d.find(x => x !== 0) < 0) { d = d.map(x => -x + 0); lim = -lim; } }
+    const label = d ? linForm(d) + ' = ' + num(lim) : 'n' + (i + 1) + '·p = ' + num(lim);
+    planes.push({ axis: i, side: s, label });
+  }
+  const corners = [];
+  for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let d = 0; d < 2; d++) {
+    const t = [a ? box.mx[0] : box.mn[0], b ? box.mx[1] : box.mn[1], d ? box.mx[2] : box.mn[2]];
+    corners.push([0, 1, 2].map(j => t[0] * box.R[0][j] + t[1] * box.R[1][j] + t[2] * box.R[2][j]));
+  }
+  // box faces as corner index quads; corner index = a*4 + b*2 + d
+  const quads = [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]];
+  const boxEdges = []; for (let i = 0; i < 8; i++) for (const bit of [1, 2, 4]) if (!(i & bit)) boxEdges.push([i, i | bit]);
+  const centre = [0, 1, 2].map(j => corners.reduce((s, q) => s + q[j], 0) / 8);
+  const radius = Math.max(...corners.map(q => len(sub(q, centre))));
+  const inside = [0, 1, 2].map(j => P.reduce((s, q) => s + q[j], 0) / P.length);
+  const faces = H.faces.map(f => { // order each face's vertices around its outward normal
+    const n = norm(f.n), o = P[f.on[0]], u = norm(sub(P[f.on[1]], o)), v = cross(n, u);
+    const g = f.on.map(i => P[i]).reduce((s, q) => [s[0] + q[0], s[1] + q[1], s[2] + q[2]], [0, 0, 0]).map(x => x / f.on.length);
+    const on = f.on.slice().sort((a, b) => Math.atan2(dot(sub(P[a], g), v), dot(sub(P[a], g), u)) - Math.atan2(dot(sub(P[b], g), v), dot(sub(P[b], g), u)));
+    return { n, on, g };
+  });
+  const hitEdges = new Set(k.C.ec.map(e => e[0])), hitFaces = new Set(k.C.ec.map(e => e[1]));
+  const touching = new Set(k.C.on.flat());
+  const aligned = box.R.every(r => r.filter(v => Math.abs(v) > 1 - 1e-9).length === 1);
+  return { c, P, H, m, box, k, planes, corners, quads, boxEdges, centre, radius, faces, hitEdges, hitFaces, touching, aligned, inside };
+}
+const S = CASES.map(prepare);
+
+// ---------- UI ----------
+const vh = i => '<i>v</i><sub>' + i + '</sub>', vc = i => 'v' + String(i).replace(/[0-9]/g, d => '₀₁₂₃₄₅₆₇₈₉'[d]);
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d'), tabs = document.getElementById('tabs');
+let cur = 0, yaw = 0.6, pitch = 0.42, zoom = 1, paused = false, dragging = false, lastT = 0;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+CASES.forEach((c, i) => { const b = document.createElement('button'); b.textContent = c.id; b.setAttribute('role', 'tab'); b.title = c.title; b.onclick = () => select(i); tabs.appendChild(b); });
+function select(i) {
+  cur = (i + S.length) % S.length; const s = S[cur];
+  [...tabs.children].forEach((b, j) => b.setAttribute('aria-selected', j === cur));
+  document.getElementById('title').textContent = (s.c.id === 'B*' ? '' : 'Category ' + s.c.id + ' — ') + s.c.title;
+  const r3 = x => num(Math.round(x * 1000) / 1000), order = s.aligned ? [0, 1, 2].map(j => s.box.R.findIndex(r => Math.abs(r[j]) > 0.5)) : [0, 1, 2], ext = order.map(i => r3(s.box.mx[i] - s.box.mn[i]));
+  const v = P => '(' + P.map(num).join(', ') + ')';
+  let h = '<h2>Vertices</h2><p class="mono">' + s.P.map((p, i) => vh(i) + ' = ' + v(p)).join('&ensp; ') + '</p>';
+  h += '<h2>Minimum box</h2><p>Volume <b>' + r3(s.box.vol) + '</b>, ' + (s.aligned ? 'axis-aligned' : 'tilted') + ', sides ' + ext.join(' × ') + '. ' +
+    (s.m.ties === 1 ? 'Unique; the next-best candidate is ' + num(Math.round((s.m.second / s.box.vol - 1) * 1000) / 10) + '% larger.' : 'Not unique.') + '</p>';
+  h += '<h2>Flush edges</h2>' + s.k.C.ec.map(([e, f]) => '<p><span class="sw"></span>edge ' + s.H.edges[e].map(vh).join('') + ' on face <span class="mono">' + s.planes[f].label + '</span></p>').join('');
+  const lone = [...s.touching].filter(i => !s.k.C.ec.some(([e]) => s.H.edges[e].includes(i)));
+  const untouched = s.P.map((p, i) => i).filter(i => !s.touching.has(i));
+  if (lone.length) h += '<p><span class="dot"></span>vertex ' + lone.map(vh).join(', ') + ' touch' + (lone.length > 1 ? '' : 'es') + ' the box at a point only</p>';
+  if (untouched.length) h += '<p>Vertex ' + untouched.map(vh).join(', ') + ' does not touch the box.</p>';
+  h += '<h2>Why this shape</h2><p id="note">' + s.c.note + '</p>';
+  document.getElementById('info').innerHTML = h;
+  history.replaceState(null, '', '#' + s.c.id);
+}
+document.getElementById('toggle').onclick = () => { const e = document.getElementById('info'); e.hidden = !e.hidden; };
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') select(cur + 1); else if (e.key === 'ArrowLeft') select(cur - 1);
+  else if (e.key === ' ') { paused = !paused; e.preventDefault(); }
+  else if (e.key >= '1' && e.key <= String(S.length)) select(+e.key - 1);
+});
+let px = 0, py = 0, moved = 0, autoRotate = true;
+cv.addEventListener('pointerdown', e => { dragging = true; moved = 0; px = e.clientX; py = e.clientY; cv.setPointerCapture(e.pointerId); cv.classList.add('drag'); });
+cv.addEventListener('pointermove', e => { if (!dragging) return; moved += Math.abs(e.clientX - px) + Math.abs(e.clientY - py); if (moved > 4) autoRotate = false; yaw += (e.clientX - px) * 0.008; pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - py) * 0.008)); px = e.clientX; py = e.clientY; });
+const up = () => { dragging = false; cv.classList.remove('drag'); };
+// a click without dragging toggles auto-rotation
+cv.addEventListener('pointerup', () => { if (moved <= 4) autoRotate = !autoRotate; });
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+cv.addEventListener('wheel', e => { zoom = Math.max(0.4, Math.min(4, zoom * Math.exp(-e.deltaY * 0.001))); e.preventDefault(); }, { passive: false });
+
+// ---------- rendering ----------
+function frame(t) {
+  const dt = Math.min(0.1, (t - lastT) / 1000 || 0); lastT = t;
+  if (!dragging && !paused && autoRotate) yaw += dt * 0.14;
+  const dpr = devicePixelRatio || 1, W = innerWidth, Hh = innerHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(Hh * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(Hh * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, Hh);
+  const s = S[cur], col = { poly: css('--poly'), hit: css('--hit'), box: css('--box'), text: css('--text'), text2: css('--text2'), bg: css('--bg'), touch: css('--touch') };
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), f = 4.5 * s.radius;
+  const view = p => { const x = p[0] - s.centre[0], y = p[1] - s.centre[1], z = p[2] - s.centre[2], x1 = x * cy - y * sy, y1 = x * sy + y * cy;
+    return [x1, y1 * sp + z * cp, -y1 * cp + z * sp]; };
+  const vdir = n => { const x1 = n[0] * cy - n[1] * sy, y1 = n[0] * sy + n[1] * cy; return [x1, y1 * sp + n[2] * cp, -y1 * cp + n[2] * sp]; };
+  const shift = (!document.getElementById('info').hidden && W > 1000) ? 150 : 0;
+  const scale = Math.min(W - 2 * shift, Hh) * 0.36 / s.radius * zoom, ox = W / 2 + shift, oy = Hh / 2 + 14;
+  const proj = q => { const k = f / (f - q[2]); return [ox + q[0] * k * scale, oy - q[1] * k * scale]; };
+  const facing = (nv, qv) => nv[0] * -qv[0] + nv[1] * -qv[1] + nv[2] * (f - qv[2]) > 0;
+  const PV = s.P.map(view), PS = PV.map(proj), CV = s.corners.map(view), CS = CV.map(proj);
+  const path = pts => { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); };
+  const line = (a, b, w, c, alpha, dash) => { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineWidth = w; ctx.strokeStyle = c; ctx.globalAlpha = alpha; ctx.setLineDash(dash || []); ctx.lineCap = 'round'; ctx.stroke(); ctx.globalAlpha = 1; ctx.setLineDash([]); };
+
+  // box faces: outward normal of face (axis i, side s) is +-R[i]
+  const bf = s.quads.map((q, fi) => { const n = s.box.R[fi >> 1].map(v => (fi & 1) ? v : -v); return facing(vdir(n), CV[q[0]]); });
+  const boxFace = (fi) => { if (!s.hitFaces.has(fi)) return; path(s.quads[fi].map(i => CS[i])); ctx.fillStyle = col.hit; ctx.globalAlpha = bf[fi] ? 0.07 : 0.13; ctx.fill(); ctx.globalAlpha = 1; };
+  const edgeFaces = (a, b) => s.quads.map((q, fi) => q.includes(a) && q.includes(b) ? fi : -1).filter(x => x >= 0);
+  const boxEdge = front => s.boxEdges.forEach(([a, b]) => { const isFront = edgeFaces(a, b).some(fi => bf[fi]); if (isFront !== front) return;
+    line(CS[a], CS[b], front ? 1.4 : 1, col.box, front ? 0.9 : 0.45, front ? null : [4, 5]); });
+  // polyhedron
+  const pf = s.faces.map(fc => facing(vdir(fc.n), view(fc.g)));
+  const light = norm([-0.4, 0.7, 0.6]);
+  const polyFace = front => s.faces.forEach((fc, i) => { if (pf[i] !== front) return; path(fc.on.map(j => PS[j]));
+    const sh = Math.max(0, dot(vdir(fc.n), light)); ctx.fillStyle = col.poly; ctx.globalAlpha = front ? 0.16 + 0.3 * sh : 0.1; ctx.fill(); ctx.globalAlpha = 1; });
+  const edgeFront = (i, j) => s.faces.some((fc, k) => pf[k] && fc.on.includes(i) && fc.on.includes(j));
+  const polyEdge = front => s.H.edges.forEach(([i, j], e) => { if (edgeFront(i, j) !== front) return; const hit = s.hitEdges.has(e);
+    if (hit) { line(PS[i], PS[j], 7, col.bg, front ? 0.9 : 0.5); line(PS[i], PS[j], 4.5, col.hit, front ? 1 : 0.6); }
+    else line(PS[i], PS[j], front ? 1.8 : 1.2, col.poly, front ? 1 : 0.5); });
+
+  for (let fi = 0; fi < 6; fi++) if (!bf[fi]) boxFace(fi);
+  boxEdge(false); polyFace(false); polyEdge(false); polyFace(true); polyEdge(true);
+  for (let fi = 0; fi < 6; fi++) if (bf[fi]) boxFace(fi);
+  boxEdge(true);
+
+  // vertices and labels
+  const cS = proj(view(s.inside));
+  ctx.font = '600 13px system-ui,"Segoe UI",sans-serif'; ctx.textBaseline = 'middle';
+  s.P.forEach((p, i) => { const q = PS[i], onHit = s.k.C.ec.some(([e]) => s.H.edges[e].includes(i));
+    ctx.beginPath(); ctx.arc(q[0], q[1], 4.5, 0, 7); ctx.fillStyle = onHit ? col.hit : col.poly; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = col.bg; ctx.stroke();
+    if (s.touching.has(i) && !onHit) { ctx.beginPath(); ctx.arc(q[0], q[1], 8.5, 0, 7); ctx.strokeStyle = col.touch; ctx.lineWidth = 2; ctx.stroke(); }
+    let dx = q[0] - cS[0], dy = q[1] - cS[1]; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+    const txt = vc(i) + '  (' + p.map(num).join(', ') + ')', w = ctx.measureText(txt).width, tx = q[0] + dx * 16 + (dx < 0 ? -w : 0), ty = q[1] + dy * 18;
+    ctx.lineWidth = 4; ctx.strokeStyle = col.bg; ctx.lineJoin = 'round'; ctx.strokeText(txt, tx, ty); ctx.fillStyle = col.text; ctx.fillText(txt, tx, ty); });
+
+  // orientation triad, bottom right
+  const tx = W - 70, ty = Hh - 86, ax = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map(vdir);
+  ax.map((a, i) => [a, i]).sort((a, b) => a[0][2] - b[0][2]).forEach(([a, i]) => { const e = [tx + a[0] * 34, ty - a[1] * 34];
+    line([tx, ty], e, 2, col.text2, 0.9); ctx.fillStyle = col.text2; ctx.fillText('xyz'[i], e[0] + a[0] * 9 - 3, e[1] - a[1] * 9); });
+  requestAnimationFrame(frame);
+}
+const want = decodeURIComponent(location.hash.slice(1)), start = CASES.findIndex(c => c.id === want);
+select(start < 0 ? 0 : start);
+requestAnimationFrame(frame);
+</script>
+</body></html>

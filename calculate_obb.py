@@ -15,7 +15,7 @@ Usage (from the repo root):
 
 Files that exceed --timeout are killed and reported; the rest still complete.
 
-The timings in the .json files (which build_index.py plots into glb.html) are
+The timings in the .json files (which build_index.py plots into site/glb.html) are
 taken while the other workers run. For timings that are not slowed down by
 them, use fewer workers than the machine has fast cores, e.g. --jobs 8.
 """

@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Scans test/glb for .glb files and writes glb.html: two scatter plots of the
-computation times (convex hull against the number of input vertices, OBB
+"""Scans test/glb for .glb files and writes site/glb.html: two scatter plots of
+the computation times (convex hull against the number of input vertices, OBB
 against the number of hull vertices), and below them a table of the files with
 links to view.html?url=<relative path>. A point of a plot opens the same link.
 The table can be sorted by any of its columns, by clicking the column header.
 
+Also writes site/results.html: the same page without the links, for
+publishing. (The models themselves are not part of the repository, so on a
+published page the links would lead nowhere.)
+
 The numbers come from the sibling <name>.json of each .glb, which
-calculate_obb.py writes. Run from the repo root: python build_index.py"""
+calculate_obb.py writes. Run from the repo root: python build_index.py
+To look at the pages, serve the repo root (python -m http.server) and open
+site/glb.html."""
 
 import html
 import json
@@ -15,7 +21,9 @@ import re
 import urllib.parse
 
 GLB_DIR = "test/glb"
-OUT_FILE = "glb.html"
+OUT_DIR = "site"
+OUT_FILE = OUT_DIR + "/glb.html"          # With links to the viewer.
+PUBLISHED_FILE = OUT_DIR + "/results.html"  # Without.
 
 
 def load_entry(p: str):
@@ -67,22 +75,27 @@ def main() -> None:
         return (0, -(e["hull_sec"] + (e["obb_sec"] or 0.0)), p)
 
     files.sort(key=sort_key)
+    for out_file, links in ((OUT_FILE, True), (PUBLISHED_FILE, False)):
+        write_page(files, out_file, links)
 
+
+def write_page(files, out_file: str, links: bool) -> None:
+    """Writes the page of the given files, in their order. Without `links`, nothing on it leads to the viewer."""
     data = []       # One row per file that has numbers, for the plots.
     table = []      # The same numbers as text: every file, in the same order.
     no_box = []     # The files that are left out of the OBB plot.
     for p, e in files:
-        url = p.replace(os.sep, "/")
-        href = "view.html?url=" + urllib.parse.quote(url, safe="/")
+        # (The pages are in OUT_DIR, one level below the paths of the files.)
+        href = "view.html?url=" + urllib.parse.quote("../" + p.replace(os.sep, "/"), safe="/.") if links else ""
         name = os.path.basename(p)
-        link = f'<td><a href="{html.escape(href, quote=True)}">{html.escape(name)}</a></td>' \
+        anchor = f'<a href="{html.escape(href, quote=True)}">{html.escape(name)}</a>' if links else html.escape(name)
+        link = f'<td>{anchor}</td>' \
                f'<td class="dim">{html.escape(os.path.basename(os.path.dirname(p)))}</td>'
         if e is None:
             table.append(f'    <tr>{link}<td class="dim" colspan="4">not computed</td></tr>')
             continue
         if e["obb_sec"] is None:
-            no_box.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(name)}</a>'
-                          f' ({e["hull"]:,} hull vertices)')
+            no_box.append(f'{anchor} ({e["hull"]:,} hull vertices)')
         flat = ' <span class="dim">flat</span>' if e["flat"] else ""
         obb = '<td class="dim">none</td>' if e["obb_sec"] is None \
             else f'<td>{format_time(e["obb_sec"])}</td>'
@@ -111,13 +124,15 @@ def main() -> None:
         "LEGEND": legend,
         "NOTE": note,
         "ROWS": "\n".join(table),
+        "CLICK_HINT": " Click a point to open the file in the viewer." if links else "",
         # (No "<" in the data, so that nothing in it can end the script element.)
         "DATA": json.dumps(data, separators=(",", ":")).replace("<", "\\u003c"),
     }
     page = re.sub(r"@([A-Z_]+)@", lambda m: values[m.group(1)], PAGE)
-    with open(OUT_FILE, "w", encoding="utf-8") as f:
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(out_file, "w", encoding="utf-8") as f:
         f.write(page)
-    print(f"wrote {OUT_FILE} with {len(files)} links, {len(data)} of them in the plots")
+    print(f"wrote {out_file} with {len(files)} files{'' if links else ' (no links)'}, {len(data)} of them in the plots")
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -187,7 +202,7 @@ PAGE = r"""<!DOCTYPE html>
 <div class="controls">
   <span class="seg" role="group" aria-label="Axis scale"><button type="button" data-scale="log" aria-pressed="true">Log axes</button><button type="button" data-scale="linear" aria-pressed="false">Linear axes</button></span>
   <button type="button" id="reset">Reset zoom</button>
-  <span class="dim">Scroll to zoom (over an axis: that axis only), drag to pan, double-click to reset. Click a point to open the file in the viewer.</span>
+  <span class="dim">Scroll to zoom (over an axis: that axis only), drag to pan, double-click to reset.@CLICK_HINT@</span>
 </div>
 <div class="charts">
   <figure id="chart-hull">
@@ -461,7 +476,7 @@ PAGE = r"""<!DOCTYPE html>
       if (spec.y !== HULL_SEC) pair('hull time', fullTime(r[HULL_SEC]));
       if (spec.y !== OBB_SEC) pair('OBB time', r[OBB_SEC] === null ? 'none' : fullTime(r[OBB_SEC]));
       add(tip, 'div', '', r[NAME]);
-      add(tip, 'div', 'hint', 'click to open in the viewer');
+      if (r[HREF]) add(tip, 'div', 'hint', 'click to open in the viewer');
       let x = p[0] + 14, y = p[1] + 14;
       if (x + tip.offsetWidth > w) x = p[0] - 14 - tip.offsetWidth;
       if (y + tip.offsetHeight > h) y = p[1] - 14 - tip.offsetHeight;
@@ -497,7 +512,7 @@ PAGE = r"""<!DOCTYPE html>
         return;
       }
       const i = pick(px, py);
-      canvas.style.cursor = i >= 0 ? 'pointer' : 'grab';
+      canvas.style.cursor = i >= 0 && rows[i][HREF] ? 'pointer' : 'grab';
       setHover(i, chart);
     });
     const release = () => { drag = null; canvas.style.cursor = 'grab'; };
@@ -516,7 +531,7 @@ PAGE = r"""<!DOCTYPE html>
     // Shift or the middle button.
     const open = e => {
       const i = panned ? -1 : pick(...local(e));
-      if (i < 0) return;
+      if (i < 0 || !rows[i][HREF]) return; // (The published page has no links.)
       if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) window.open(rows[i][HREF], '_blank', 'noopener');
       else location.href = rows[i][HREF];
     };

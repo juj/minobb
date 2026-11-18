@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A proof of the three-contact conjecture for minimum-volume bounding boxes</title>
+<style>
+:root{
+  color-scheme: light;
+  --surface:#fcfcfb; --panel:#f3f2ee; --border:#dddcd4;
+  --text:#0b0b0b; --text2:#52514e; --muted:#8a897f; --grid:#e4e3dc;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --poly:142,152,170;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    color-scheme: dark;
+    --surface:#1a1a19; --panel:#242422; --border:#3a3a36;
+    --text:#f0efec; --text2:#c3c2b7; --muted:#8f8e85; --grid:#33332f;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --poly:120,130,150;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--surface);color:var(--text);
+  font:17px/1.6 Georgia,"Times New Roman",serif}
+main{max-width:980px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:1.9em;line-height:1.2;margin:.2em 0 .3em}
+h2{font-size:1.35em;margin:2.2em 0 .5em;padding-top:.4em;border-top:1px solid var(--border)}
+h3{font-size:1.08em;margin:1.4em 0 .3em}
+p{margin:.7em 0}
+.lede{color:var(--text2);font-size:1.05em}
+.note{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:.95em}
+.thm{border-left:4px solid var(--s1);background:var(--panel);padding:10px 16px;border-radius:0 8px 8px 0;margin:1em 0}
+.thm b.t{font-variant:small-caps;letter-spacing:.03em}
+.eq{display:block;text-align:center;margin:.9em 0;font-size:1.06em;overflow-x:auto;white-space:nowrap}
+i.v,.eq i{font-family:"Cambria Math","STIX Two Text",Georgia,serif;padding:0 .09em 0 .03em}
+table.cases{border-collapse:collapse;width:100%;font-size:.93em;margin:1em 0}
+table.cases th,table.cases td{border-bottom:1px solid var(--border);padding:7px 8px;text-align:left;vertical-align:top}
+table.cases th{color:var(--text2);font-weight:normal;font-style:italic}
+table.cases a{color:var(--s1);cursor:pointer;text-decoration:underline}
+figure{margin:1.4em 0;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+figcaption{font-size:.9em;color:var(--text2);margin-top:10px}
+.ui{font:14px/1.4 system-ui,"Segoe UI",sans-serif}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.tabs button,.btn{font:inherit;padding:5px 10px;border:1px solid var(--border);border-radius:6px;
+  background:var(--surface);color:var(--text);cursor:pointer}
+.tabs button[aria-pressed=true]{background:var(--text);color:var(--surface);border-color:var(--text)}
+.grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+canvas#view{width:100%;height:400px;display:block;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;cursor:grab;touch-action:none}
+canvas#view:active{cursor:grabbing}
+.plotwrap{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px}
+svg{display:block;width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:4px 16px;color:var(--text2);margin:2px 4px 6px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{display:inline-block;width:22px;height:0;border-top:2px solid var(--s1)}
+.sw.g{border-top:2px dashed var(--s2)}
+.sw.e{border-top:4px solid var(--s3)}
+.sw.d{width:9px;height:9px;border:0;border-radius:50%;background:var(--s2)}
+.tip{position:absolute;pointer-events:none;background:var(--text);color:var(--surface);padding:4px 8px;border-radius:5px;
+  font-size:12px;white-space:nowrap;display:none;z-index:2}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:8px 0}
+.row label{color:var(--text2)}
+input[type=range]{accent-color:var(--s1)}
+#tslider{flex:1;min-width:160px}
+.readout{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin-top:8px}
+.readout dt{color:var(--text2)} .readout dd{margin:0;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;border:1px solid var(--border);background:var(--surface)}
+#casedesc{margin:10px 2px 0;font:15px/1.5 Georgia,serif;color:var(--text)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:760px){.two{grid-template-columns:1fr}}
+.sl{display:grid;grid-template-columns:20px 1fr 54px;gap:8px;align-items:center;margin:4px 0}
+.sl output{font-variant-numeric:tabular-nums;text-align:right}
+.status{margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--surface);border:1px solid var(--border)}
+.small{font-size:.9em;color:var(--text2)}
+.qed{float:right}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Minimum-volume bounding boxes have three edge contacts</h1>
+<p class="lede">A proof of Conjecture&nbsp;7.1 of J.&nbsp;Jyl&auml;nki, <em>An Exact Algorithm for Finding Minimum Oriented
+Bounding Boxes</em> (2015), in the stronger form that holds for every <em>local</em> minimum of the volume &mdash;
+with interactive figures for each case of the argument.</p>
+
+<p class="note ui">Status: this proof was produced with AI assistance and checked numerically (the Hessian formula against
+finite differences, and several hundred random &ldquo;two edges&nbsp;+ four vertices&rdquo; configurations). It has not been
+peer reviewed, but the theorem has been formalized and machine-checked in Lean&nbsp;4 with Mathlib (see
+<code>lean/README.md</code> and the guided reading in <a href="lean-walkthrough.html">lean-walkthrough.html</a>; the formal proof replaces the calculus on SO(3) by explicit polynomial curves and obtains the
+torque balance from three one-parameter motions). The figures below compute everything live from actual polyhedra, so
+they double as a sanity check.</p>
+
+<h2>1. Statement</h2>
+
+<p>Let <i class="v">K</i> &sub; &#8477;&sup3; be a convex polyhedron with non-empty interior. A box circumscribing
+<i class="v">K</i> is determined by its orientation <i class="v">R</i> &isin; SO(3): its axes are
+<i class="v">u<sub>i</sub></i> = <i class="v">R e<sub>i</sub></i> and each of its six faces is a supporting plane of
+<i class="v">K</i>. An <em>edge&ndash;face contact</em> is a pair (<i class="v">f</i>, <i class="v">e</i>) where the box
+face <i class="v">f</i> contains the whole polyhedron edge <i class="v">e</i>. Two contacts are distinct if the faces or the
+edges differ; so a box face flush with a polygonal face of <i class="v">K</i> counts at least three contacts, and a
+polyhedron edge lying along a box edge counts two.</p>
+
+<div class="thm"><b class="t">Theorem.</b> Let a box circumscribing <i class="v">K</i> be a <em>local</em> minimum of
+the volume among all circumscribing boxes. Then it has at least three distinct edge&ndash;face contacts, and they do not
+all lie on one pair of opposite box faces (so at least two of them occur on adjacent faces).</div>
+
+<p>Conjecture&nbsp;7.1 is the special case of a global minimum. The theorem also answers the question raised at the end
+of the paper (whether the conjecture extends to all local minima), and rules out the configuration O&rsquo;Rourke
+suspected might be a local minimum: a box flush with exactly two edges and touching four further vertices.</p>
+
+<h2>2. Setup</h2>
+
+<p>Write <i class="v">h</i>(<i class="v">u</i>) = max<sub><i class="v">v</i>&isin;<i class="v">K</i></sub>
+<i class="v">v</i>&middot;<i class="v">u</i> for the support function and
+<i class="v">w</i>(<i class="v">u</i>) = <i class="v">h</i>(<i class="v">u</i>) + <i class="v">h</i>(&minus;<i class="v">u</i>)
+for the width. The volume of the box with orientation <i class="v">R</i> is
+&prod; <i class="v">w</i>(<i class="v">R e<sub>i</sub></i>); we work with its logarithm</p>
+<span class="eq"><i>F</i>(<i>R</i>) = &sum;<sub><i>i</i>=1..3</sub> log <i>w</i>(<i>R e<sub>i</sub></i>).</span>
+<p>Fix a locally minimal box <i class="v">R</i><sub>0</sub>, and use its frame as coordinates, so
+<i class="v">u<sub>i</sub></i> = <i class="v">e<sub>i</sub></i>; let <i class="v">w<sub>i</sub></i> be its side lengths.
+Each of the six box faces meets <i class="v">K</i> in a <em>contact set</em>: a vertex, an edge, or a polygonal face of
+<i class="v">K</i>. Let <i class="v">N</i> be the number of edge&ndash;face contacts.</p>
+<p>Let <i class="v">M</i> be the set of orientations near <i class="v">R</i><sub>0</sub> for which every box face still
+contains the contact set it contains at <i class="v">R</i><sub>0</sub> &mdash; the boxes that &ldquo;keep all current
+contacts&rdquo;.</p>
+
+<h2>3. Step 1 &mdash; first-order condition: a torque balance</h2>
+
+<p>Near <i class="v">R</i><sub>0</sub> the supporting vertices of each box face come from that face&rsquo;s contact set, so
+<i class="v">F</i> is the maximum of finitely many smooth functions <i class="v">F</i><sub>&sigma;</sub>, one for each
+choice &sigma; of a vertex <i class="v">v<sub>i</sub></i><sup>&plusmn;</sup> in each of the six contact sets:
+<i class="v">F</i><sub>&sigma;</sub>(<i class="v">R</i>) = &sum; log
+(<i class="v">v<sub>i</sub></i><sup>+</sup> &minus; <i class="v">v<sub>i</sub></i><sup>&minus;</sup>)&middot;<i class="v">R e<sub>i</sub></i>.
+Perturbing <i class="v">R</i> = exp([&omega;]<sub>&times;</sub>) <i class="v">R</i><sub>0</sub>, the derivative of
+<i class="v">F</i><sub>&sigma;</sub> in direction &omega; is
+&omega; &middot; &sum;<sub><i class="v">i</i></sub> <i class="v">u<sub>i</sub></i> &times;
+(<i class="v">v<sub>i</sub></i><sup>+</sup> &minus; <i class="v">v<sub>i</sub></i><sup>&minus;</sup>) / <i class="v">w<sub>i</sub></i>.</p>
+
+<p>At a local minimum of a maximum of smooth functions, the directional derivative
+max<sub>&sigma;</sub> <i class="v">dF</i><sub>&sigma;</sub>(&omega;) is non-negative for every &omega;, which by the
+separating hyperplane theorem means 0 lies in the convex hull of the gradients. The gradient is a sum of six terms, each
+affine in one vertex, so that convex hull is obtained by letting each vertex range over the convex hull of its contact
+set. Hence:</p>
+
+<div class="thm"><b class="t">Lemma 1.</b> There are points
+<i class="v">P<sub>i</sub></i><sup>+</sup>, <i class="v">P<sub>i</sub></i><sup>&minus;</sup> of <i class="v">K</i>, lying
+in the contact sets of the faces +<i class="v">u<sub>i</sub></i> and &minus;<i class="v">u<sub>i</sub></i>, such that with
+<i class="v">D<sub>i</sub></i> = <i class="v">P<sub>i</sub></i><sup>+</sup> &minus; <i class="v">P<sub>i</sub></i><sup>&minus;</sup>
+<span class="eq">&sum;<sub><i>i</i></sub> <i>u<sub>i</sub></i> &times; <i>D<sub>i</sub></i> / <i>w<sub>i</sub></i> = 0.</span>
+</div>
+
+<p>Now define the smooth function &mdash; the log-volume of the box &ldquo;through the six fixed points&rdquo; &mdash;</p>
+<span class="eq"><i>G</i>(<i>R</i>) = &sum;<sub><i>i</i></sub> log ( <i>D<sub>i</sub></i> &middot; <i>R e<sub>i</sub></i> ).</span>
+<p>Three facts carry the whole proof:</p>
+<ul>
+<li><b><i class="v">F</i> &ge; <i class="v">G</i></b> near <i class="v">R</i><sub>0</sub>: since
+<i class="v">P<sub>i</sub></i><sup>&plusmn;</sup> &isin; <i class="v">K</i>, the width in any direction
+<i class="v">u</i> is at least <i class="v">D<sub>i</sub></i>&middot;<i class="v">u</i>.</li>
+<li><b><i class="v">F</i> = <i class="v">G</i> on <i class="v">M</i></b>: while a box face still contains its original
+contact set, the point <i class="v">P<sub>i</sub></i><sup>&plusmn;</sup> is still a support point of that face.</li>
+<li><b><i class="v">R</i><sub>0</sub> is a critical point of <i class="v">G</i></b>: that is exactly Lemma&nbsp;1.</li>
+</ul>
+<p>So if <i class="v">M</i> contains a curve through <i class="v">R</i><sub>0</sub> along which <i class="v">G</i> strictly
+decreases, the box is not a local minimum. In Figure&nbsp;1 below, <i class="v">F</i> is the blue curve and
+<i class="v">G</i> the dashed orange one: they coincide for motions inside <i class="v">M</i>, and
+<i class="v">F</i> develops an upward kink above <i class="v">G</i> for motions that break an edge contact.</p>
+
+<h2>4. Step 2 &mdash; the Hessian of <i class="v">G</i> is negative semidefinite</h2>
+
+<p>Let <i class="v">x<sub>i</sub></i> = <i class="v">D<sub>i</sub></i> / <i class="v">w<sub>i</sub></i> and let
+<i class="v">X</i> be the 3&times;3 matrix with columns <i class="v">x<sub>i</sub></i>; its diagonal entries are 1.
+A direct computation gives
+&sum; <i class="v">e<sub>i</sub></i> &times; <i class="v">x<sub>i</sub></i> =
+(<i class="v">X</i><sub>32</sub>&minus;<i class="v">X</i><sub>23</sub>,
+<i class="v">X</i><sub>13</sub>&minus;<i class="v">X</i><sub>31</sub>,
+<i class="v">X</i><sub>21</sub>&minus;<i class="v">X</i><sub>12</sub>), so</p>
+<span class="eq">Lemma 1 &nbsp;&hArr;&nbsp; <i>X</i> is symmetric.</span>
+<p>Write <i class="v">p</i> = <i class="v">X</i><sub>12</sub>, <i class="v">q</i> = <i class="v">X</i><sub>13</sub>,
+<i class="v">r</i> = <i class="v">X</i><sub>23</sub>.</p>
+
+<div class="thm"><b class="t">Lemma 2 (key bound).</b> |<i class="v">p</i>|, |<i class="v">q</i>|, |<i class="v">r</i>| &le; 1.</div>
+<p><em>Proof.</em> The points <i class="v">P</i><sub>2</sub><sup>&plusmn;</sup> lie in the box, so
+|<i class="v">D</i><sub>2</sub>&middot;<i class="v">e</i><sub>1</sub>| &le; <i class="v">w</i><sub>1</sub>, i.e.
+|<i class="v">X</i><sub>12</sub>| &le; <i class="v">w</i><sub>1</sub>/<i class="v">w</i><sub>2</sub>. Likewise
+|<i class="v">D</i><sub>1</sub>&middot;<i class="v">e</i><sub>2</sub>| &le; <i class="v">w</i><sub>2</sub> gives
+|<i class="v">X</i><sub>21</sub>| &le; <i class="v">w</i><sub>2</sub>/<i class="v">w</i><sub>1</sub>. By symmetry the two
+entries are the same number <i class="v">p</i>, so |<i class="v">p</i>| &le;
+min(<i class="v">w</i><sub>1</sub>/<i class="v">w</i><sub>2</sub>, <i class="v">w</i><sub>2</sub>/<i class="v">w</i><sub>1</sub>) &le; 1.
+The same holds for <i class="v">q</i> and <i class="v">r</i>. <span class="qed">&#9633;</span></p>
+
+<figure class="ui">
+<div class="two">
+  <div>
+    <div class="plotwrap"><svg id="boundsvg" viewBox="0 18 360 214" role="img" aria-label="Rectangle with two chords"></svg></div>
+  </div>
+  <div>
+    <div class="sl"><label for="bp"><i class="v">p</i></label><input id="bp" type="range" min="-1.5" max="1.5" step="0.01" value="0.6"><output id="bpo"></output></div>
+    <div class="sl"><label for="br" title="aspect ratio">&rho;</label><input id="br" type="range" min="0.5" max="2" step="0.01" value="1.3"><output id="bro"></output></div>
+    <div class="small">&rho; = <i class="v">w</i><sub>1</sub>/<i class="v">w</i><sub>2</sub> is the aspect ratio of the box
+    seen along <i class="v">u</i><sub>3</sub>.</div>
+    <div class="status" id="bstat"></div>
+  </div>
+</div>
+<figcaption><b>Figure 2 &mdash; why |<i class="v">p</i>| &le; 1.</b> The box seen along <i class="v">u</i><sub>3</sub>.
+The torque balance forces the two chords to shear by the <em>same</em> ratio <i class="v">p</i>: chord
+<i class="v">D</i><sub>1</sub> (between the left and right faces) rises by <i class="v">p&middot;w</i><sub>1</sub>, and chord
+<i class="v">D</i><sub>2</sub> (between the bottom and top faces) shifts sideways by <i class="v">p&middot;w</i><sub>2</sub>.
+Both must fit inside the rectangle, which is only possible when
+|<i class="v">p</i>| &le; min(&rho;, 1/&rho;) &le; 1.</figcaption>
+</figure>
+
+<p>Expanding <i class="v">R</i> = exp([&omega;]<sub>&times;</sub>) to second order, with
+<i class="v">R e<sub>i</sub></i> = <i class="v">e<sub>i</sub></i> + &omega;&times;<i class="v">e<sub>i</sub></i> +
+&frac12; &omega;&times;(&omega;&times;<i class="v">e<sub>i</sub></i>) + &hellip;, one finds
+<i class="v">G</i> = <i class="v">G</i>(<i class="v">R</i><sub>0</sub>) + &frac12; <i class="v">H</i>(&omega;) +
+<i class="v">O</i>(|&omega;|&sup3;) with</p>
+<span class="eq"><i>H</i>(&omega;) = &minus;2|&omega;|&sup2; + 2(<i>p</i>&omega;<sub>1</sub>&omega;<sub>2</sub> +
+<i>q</i>&omega;<sub>1</sub>&omega;<sub>3</sub> + <i>r</i>&omega;<sub>2</sub>&omega;<sub>3</sub>)
+&minus; (<i>p</i>&omega;<sub>3</sub>&minus;<i>q</i>&omega;<sub>2</sub>)&sup2;
+&minus; (<i>r</i>&omega;<sub>1</sub>&minus;<i>p</i>&omega;<sub>3</sub>)&sup2;
+&minus; (<i>q</i>&omega;<sub>2</sub>&minus;<i>r</i>&omega;<sub>1</sub>)&sup2;.</span>
+
+<div class="thm"><b class="t">Lemma 3.</b> <i class="v">H</i>(&omega;) &le; 0 for all &omega;, and
+<i class="v">H</i>(<i class="v">e<sub>i</sub></i>) &le; &minus;2. Moreover <i class="v">H</i>(&omega;) = 0 with
+&omega; &ne; 0 only in the <em>diagonal case</em>: the box is a cube, <i class="v">K</i> contains two opposite corners
+of it, every <i class="v">D<sub>i</sub></i> is &plusmn; the space diagonal <i class="v">d</i> joining them, and
+&omega; &#8741; <i class="v">d</i>.</div>
+<p><em>Proof.</em> By Lemma&nbsp;2 and the inequality
+|&omega;<sub>1</sub>&omega;<sub>2</sub>| + |&omega;<sub>1</sub>&omega;<sub>3</sub>| + |&omega;<sub>2</sub>&omega;<sub>3</sub>|
+&le; |&omega;|&sup2;, the first two terms sum to at most 0 and the squares are subtracted. Equality forces
+|&omega;<sub>1</sub>| = |&omega;<sub>2</sub>| = |&omega;<sub>3</sub>| and
+<i class="v">p</i> = sgn(&omega;<sub>1</sub>&omega;<sub>2</sub>),
+<i class="v">q</i> = sgn(&omega;<sub>1</sub>&omega;<sub>3</sub>),
+<i class="v">r</i> = sgn(&omega;<sub>2</sub>&omega;<sub>3</sub>). Then
+|<i class="v">p</i>| = 1 forces <i class="v">w</i><sub>1</sub> = <i class="v">w</i><sub>2</sub> and the chords to span the
+full box in the transverse directions; with all three, the box is a cube, every
+<i class="v">P<sub>i</sub></i><sup>&plusmn;</sup> is a corner, and
+<i class="v">x<sub>i</sub></i> = <i class="v">s<sub>i</sub></i>&middot;(<i class="v">s</i><sub>1</sub>,<i class="v">s</i><sub>2</sub>,<i class="v">s</i><sub>3</sub>)
+with <i class="v">s<sub>i</sub></i> = sgn &omega;<sub><i class="v">i</i></sub>, a vector parallel to &omega;.
+<span class="qed">&#9633;</span></p>
+
+<figure class="ui">
+<div class="two">
+  <div>
+    <div class="sl"><label for="hp"><i class="v">p</i></label><input id="hp" type="range" min="-1.5" max="1.5" step="0.01" value="0.35"><output id="hpo"></output></div>
+    <div class="sl"><label for="hq"><i class="v">q</i></label><input id="hq" type="range" min="-1.5" max="1.5" step="0.01" value="-0.3"><output id="hqo"></output></div>
+    <div class="sl"><label for="hr"><i class="v">r</i></label><input id="hr" type="range" min="-1.5" max="1.5" step="0.01" value="0.4"><output id="hro"></output></div>
+    <div class="row">
+      <button class="btn" data-h="0.35,-0.3,0.4">generic</button>
+      <button class="btn" data-h="1,1,1">diagonal case</button>
+      <button class="btn" data-h="1,-1,-1">diagonal, other signs</button>
+      <button class="btn" data-h="1.5,0,0">impossible: <i class="v">p</i> = 1.5</button>
+    </div>
+  </div>
+  <div>
+    <div class="plotwrap"><svg id="eigsvg" viewBox="0 0 360 120" role="img" aria-label="Eigenvalues of the Hessian"></svg></div>
+    <div class="status" id="hstat"></div>
+  </div>
+</div>
+<figcaption><b>Figure 3 &mdash; eigenvalues of the quadratic form <i class="v">H</i>.</b> Inside the cube
+|<i class="v">p</i>|, |<i class="v">q</i>|, |<i class="v">r</i>| &le; 1 all three eigenvalues stay &le; 0, and one reaches 0
+only at the four corners with <i class="v">pqr</i> = 1 (the diagonal case). Drag a slider past &plusmn;1 &mdash; which
+Lemma&nbsp;2 forbids &mdash; and an eigenvalue can cross to the positive side: this is exactly where the geometry of
+&ldquo;contact points lie in the box&rdquo; enters the proof.</figcaption>
+</figure>
+
+<h2>5. Step 3 &mdash; fewer than three contacts leaves a free curve in <i class="v">M</i></h2>
+
+<p>Suppose <i class="v">N</i> &le; 2. Then no box face is flush with a polygonal face of <i class="v">K</i>, at most two box
+faces contain an edge, and each such face normal lies in the relative interior of that edge&rsquo;s normal cone. So near
+<i class="v">R</i><sub>0</sub> the set <i class="v">M</i> is cut out exactly by the equations &ldquo;face normal &perp;
+edge direction&rdquo;, one equation per contact. Going through the possibilities (click a row to load it in Figure&nbsp;1):</p>
+
+<table class="cases ui">
+<tr><th>Contacts at <i class="v">R</i><sub>0</sub></th><th><i class="v">M</i> contains</th><th>Tangent &omega;<sub>0</sub> available</th></tr>
+<tr><td><a data-case="a">None (six vertices)</a></td><td>a full neighbourhood of <i class="v">R</i><sub>0</sub></td><td>any</td></tr>
+<tr><td><a data-case="b">One edge <i class="v">a</i> in face <i class="v">u</i><sub>1</sub></a></td><td>the surface <i class="v">a</i>&middot;<i class="v">R e</i><sub>1</sub> = 0</td><td>a 2-plane of directions</td></tr>
+<tr><td><a data-case="c">Two edges in opposite faces &plusmn;<i class="v">u</i><sub>1</sub></a></td><td>rotations about <i class="v">u</i><sub>1</sub></td><td><i class="v">e</i><sub>1</sub></td></tr>
+<tr><td><a data-case="d">Edges <i class="v">a</i> &sub; face <i class="v">u</i><sub>1</sub>, <i class="v">b</i> &sub; face <i class="v">u</i><sub>2</sub>, with
+<i class="v">u</i><sub>1</sub>&times;<i class="v">a</i> &#8742; <i class="v">u</i><sub>2</sub>&times;<i class="v">b</i></a>
+(includes <a data-case="f">one edge along a box edge</a>)</td>
+<td>a smooth curve (implicit function theorem)</td><td>(<i class="v">u</i><sub>1</sub>&times;<i class="v">a</i>) &times; (<i class="v">u</i><sub>2</sub>&times;<i class="v">b</i>)</td></tr>
+<tr><td><a data-case="e">Same, with <i class="v">u</i><sub>1</sub>&times;<i class="v">a</i> &#8741; <i class="v">u</i><sub>2</sub>&times;<i class="v">b</i></a>
+(this forces <i class="v">a</i> &#8741; <i class="v">u</i><sub>2</sub>, <i class="v">b</i> &#8741; <i class="v">u</i><sub>1</sub>)</td>
+<td>rotations about <i class="v">u</i><sub>1</sub></td><td><i class="v">e</i><sub>1</sub></td></tr>
+</table>
+
+<p>(Two edges cannot lie in the same box face without a whole polygonal face lying in it. In the last row:
+<i class="v">u</i><sub>1</sub>&times;<i class="v">a</i> is perpendicular to <i class="v">u</i><sub>1</sub> and
+<i class="v">u</i><sub>2</sub>&times;<i class="v">b</i> to <i class="v">u</i><sub>2</sub>, so if they are parallel both
+are multiples of <i class="v">u</i><sub>3</sub>.)</p>
+
+<p><b>All rows except the fourth.</b> The tangent &omega;<sub>0</sub> can be chosen not parallel to any
+(&plusmn;1,&plusmn;1,&plusmn;1), so <i class="v">H</i>(&omega;<sub>0</sub>) &lt; 0 by Lemma&nbsp;3. Along a curve &gamma; in
+<i class="v">M</i> with that tangent,</p>
+<span class="eq"><i>F</i>(&gamma;(<i>t</i>)) = <i>G</i>(&gamma;(<i>t</i>)) = <i>F</i>(<i>R</i><sub>0</sub>) +
+&frac12; <i>H</i>(&omega;<sub>0</sub>) <i>t</i>&sup2; + <i>o</i>(<i>t</i>&sup2;) &lt; <i>F</i>(<i>R</i><sub>0</sub>)</span>
+<p>for small <i class="v">t</i> &ne; 0 (the second-order expansion along any curve is governed by <i class="v">H</i> because
+<i class="v">R</i><sub>0</sub> is a critical point of <i class="v">G</i>). This contradicts local minimality.</p>
+
+<p><b>Fourth row.</b> <i class="v">M</i> is a curve &gamma; with a forced tangent &omega;<sub>0</sub>. If
+<i class="v">H</i>(&omega;<sub>0</sub>) &lt; 0 we conclude as before. Otherwise we are in the
+<a data-case="g" class="ui" style="color:var(--s1);cursor:pointer;text-decoration:underline;font:inherit">diagonal case</a>
+of Lemma&nbsp;3: all <i class="v">D<sub>i</sub></i> = &plusmn;<i class="v">d</i>, so
+<i class="v">G</i>(<i class="v">R</i>) = &sum; log |<i class="v">d</i>&middot;<i class="v">R e<sub>i</sub></i>|. Since
+&sum; (<i class="v">d</i>&middot;<i class="v">R e<sub>i</sub></i>)&sup2; = |<i class="v">d</i>|&sup2;, the AM&ndash;GM
+inequality gives <i class="v">G</i>(<i class="v">R</i>) &le; <i class="v">G</i>(<i class="v">R</i><sub>0</sub>), with equality
+near <i class="v">R</i><sub>0</sub> only if <i class="v">R</i> is <i class="v">R</i><sub>0</sub> followed by a rotation about
+<i class="v">d</i>. But a rotation about <i class="v">d</i> by a small angle &theta; &ne; 0 does not stay in
+<i class="v">M</i>: the function &theta; &#8614; <i class="v">a</i>&middot;<i class="v">u</i><sub>1</sub>(&theta;) is a
+trigonometric polynomial vanishing at 0, and it cannot vanish identically, because
+<i class="v">u</i><sub>1</sub>(&theta;) sweeps a non-planar cone around <i class="v">d</i>
+(<i class="v">u</i><sub>1</sub> is neither parallel nor perpendicular to <i class="v">d</i>), which would force
+<i class="v">a</i> = 0. So its zero at 0 is isolated, the points of &gamma; other than <i class="v">R</i><sub>0</sub> are not
+rotations about <i class="v">d</i>, and there <i class="v">F</i> = <i class="v">G</i> &lt; <i class="v">F</i>(<i class="v">R</i><sub>0</sub>).
+Contradiction again.</p>
+
+<p>Hence <i class="v">N</i> &ge; 3 at every local minimum.</p>
+
+<figure class="ui" id="fig1">
+<div class="tabs" id="casetabs"></div>
+<div class="grid">
+  <div>
+    <canvas id="view" aria-label="3D view of the polyhedron and its bounding box; drag to rotate"></canvas>
+    <div class="legend" style="margin-top:6px">
+      <span><i class="sw e"></i>flush edge</span>
+      <span><i class="sw d"></i>contact points <i class="v">P<sub>i</sub></i><sup>&plusmn;</sup></span>
+      <span><i class="sw g"></i>chords <i class="v">D<sub>i</sub></i></span>
+      <label><input type="checkbox" id="showD" checked> chords</label>
+      <label><input type="checkbox" id="showGhost" checked> box at <i class="v">t</i>=0</label>
+    </div>
+  </div>
+  <div>
+    <div class="row" style="margin-top:0"><label for="motion">Motion of the box:</label>
+      <select id="motion" class="btn"></select></div>
+    <div class="legend">
+      <span><i class="sw"></i><i class="v">F</i>: true box volume</span>
+      <span><i class="sw g"></i><i class="v">G</i>: box through the six contact points</span>
+    </div>
+    <div class="plotwrap" id="plotwrap">
+      <svg id="plot" viewBox="0 0 420 260" role="img" aria-label="Volume relative to the starting box, as a function of the motion parameter"></svg>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="row">
+      <label for="tslider"><i class="v">t</i></label>
+      <input id="tslider" type="range" min="-15" max="15" step="0.1" value="0">
+      <button class="btn" id="play">&#9654; animate</button>
+    </div>
+    <dl class="readout">
+      <dt>Contacts <i class="v">N</i></dt><dd id="roN"></dd>
+      <dt>This motion</dt><dd id="roM"></dd>
+      <dt><i class="v">H</i>(&omega;<sub>0</sub>), |&omega;<sub>0</sub>|=1</dt><dd id="roH"></dd>
+      <dt>(<i class="v">p</i>, <i class="v">q</i>, <i class="v">r</i>)</dt><dd id="roX"></dd>
+      <dt>At <i class="v">t</i> = <span id="roT"></span></dt><dd id="roV"></dd>
+    </dl>
+  </div>
+</div>
+<div id="casedesc"></div>
+<figcaption><b>Figure 1 &mdash; the cases of Step 3.</b> Each tab is a polyhedron whose starting box
+(<i class="v">t</i> = 0) satisfies the first-order condition of Lemma&nbsp;1 with fewer than three edge contacts. Drag the
+3D view to orbit; move the slider (or click the plot) to move the box along the selected motion. Volumes are relative to
+the starting box. For motions that stay in <i class="v">M</i> the two curves coincide and have a strict local
+<em>maximum</em> at <i class="v">t</i> = 0, so the box can be shrunk. For motions that leave <i class="v">M</i>, an edge
+contact breaks and the true volume kinks upward &mdash; which is why such boxes look like minima if one only tries
+rotations about the box axes.</figcaption>
+</figure>
+
+<h2>6. Step 4 &mdash; two contacts on adjacent faces</h2>
+
+<p>Suppose all contacts, however many, lie on one pair of opposite faces &plusmn;<i class="v">u</i><sub>1</sub>. The other
+four faces touch single vertices, so rotations about <i class="v">u</i><sub>1</sub> stay in <i class="v">M</i>, and
+<i class="v">H</i>(<i class="v">e</i><sub>1</sub>) &le; &minus;2 &lt; 0 gives the same contradiction. So contacts occur on at
+least two non-parallel faces, and non-parallel faces of a box are adjacent. <span class="qed">&#8718;</span></p>
+
+<h2>7. Remarks</h2>
+<ul>
+<li><b>What makes it work.</b> The torque balance makes <i class="v">X</i> symmetric, and then containment of the contact
+points in the box bounds each off-diagonal entry by a width ratio <em>and</em> by its inverse. That one inequality turns
+the Hessian of the six-point box volume negative semidefinite.</li>
+<li><b>Relation to O&rsquo;Rourke&rsquo;s theorem.</b> Steps 3 and 4 reprove Theorem&nbsp;2.1 of the paper (two adjacent
+faces flush with edges) without analysing the degree-six polynomial, and exclude the &ldquo;two edges, four
+vertices&rdquo; local minimum that the polynomial was needed for.</li>
+<li><b>Consequence for the algorithm.</b> Every local minimum &mdash; in particular the global one &mdash; is among the
+orientations with at least three edge&ndash;face contacts (categories A&ndash;D of the paper), which is the set the
+algorithm enumerates.</li>
+<li><b>What it does not say.</b> The argument shows a box with a free curve in <i class="v">M</i> is never a local
+minimum. It does not decide which three-contact configurations are minima; that remains the job of the enumeration.</li>
+<li><b>Surface area.</b> Whether the same approach settles the minimum-surface-area question mentioned in the paper has
+not been examined here.</li>
+</ul>
+
+<p class="small ui">Reference: J. Jyl&auml;nki, &ldquo;An Exact Algorithm for Finding Minimum Oriented Bounding
+Boxes&rdquo;, 2015. J. O&rsquo;Rourke, &ldquo;Finding minimal enclosing boxes&rdquo;, Int. J. Computer &amp; Information
+Sciences 14(3), 1985.</p>
+
+</main>
+
+<script>
+"use strict";
+/* ---------- small vector library ---------- */
+const add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]], sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2], sc=(a,s)=>[a[0]*s,a[1]*s,a[2]*s];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const len=a=>Math.hypot(a[0],a[1],a[2]), unit=a=>sc(a,1/len(a));
+const E=[[1,0,0],[0,1,0],[0,0,1]];
+function rotv(k,th,v){k=unit(k);const c=Math.cos(th),s=Math.sin(th);
+  return add(add(sc(v,c),sc(cross(k,v),s)),sc(k,dot(k,v)*(1-c)));}
+const rotAxis=k=>th=>E.map(e=>rotv(k,th,e));
+function mCurve(i,a,j,b){const k=3-i-j;
+  const s2=Math.sign(dot(cross(b,E[i]),E[j])), s3=Math.sign(dot(cross(E[i],E[j]),E[k]));
+  return th=>{const ui=rotv(a,th,E[i]), uj=sc(unit(cross(b,ui)),s2), uk=sc(cross(ui,uj),s3);
+    const R=[];R[i]=ui;R[j]=uj;R[k]=uk;return R;};}
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt=(x,d=3)=>(x<0?"−":"")+Math.abs(x).toFixed(d);
+
+/* ---------- case construction ---------- */
+function base(w,p,q,r,c){return{w,
+  Pm:[[0,c[0],c[1]],[c[2],0,c[3]],[c[4],c[5],0]],
+  Pp:[[w[0],c[0]+p*w[0],c[1]+q*w[0]],[c[2]+p*w[1],w[1],c[3]+r*w[1]],[c[4]+q*w[2],c[5]+r*w[2],w[2]]]};}
+const seg=(P,a,L,lam=0.5)=>{a=unit(a);return{a,v0:add(P,sc(a,-lam*L)),v1:add(P,sc(a,(1-lam)*L))};};
+const W=[1.5,1.2,1.0], C0=[0.3,0.75,0.5,0.2,0.9,0.35];
+const std=()=>base(W,0.35,-0.3,0.4,C0);
+const AX=["u₁","u₂","u₃"];
+const axisMotions=()=>[0,1,2].map(i=>({label:"rotate about "+AX[i],w0:E[i],R:rotAxis(E[i])}));
+
+function makeCases(){
+  const cs=[];
+  { const b=std();
+    cs.push({id:"a",tab:"No edge contact",...b,edges:[],motions:axisMotions(),
+      desc:"<b>Six vertex contacts.</b> Every nearby orientation keeps the same six supporting vertices, so <i class='v'>F</i> = <i class='v'>G</i> on a whole neighbourhood and <i class='v'>M</i> is everything. The box volume is a smooth function with a negative definite Hessian here: this stationary box is a strict local <em>maximum</em>, and any rotation shrinks it."});
+  }
+  { const b=std(); const e=seg(b.Pp[0],[0,0.8,0.6],0.5);
+    cs.push({id:"b",tab:"One edge",...b,edges:[{axis:0,sign:1,...e}],
+      motions:[{label:"rotate about u₁",w0:E[0],R:rotAxis(E[0])},{label:"rotate about the edge a",w0:e.a,R:rotAxis(e.a)},
+               {label:"rotate about u₂",w0:E[1],R:rotAxis(E[1])},{label:"rotate about u₃",w0:E[2],R:rotAxis(E[2])}],
+      desc:"<b>One edge in face <i class='v'>u</i><sub>1</sub>.</b> <i class='v'>M</i> is the surface of orientations whose face <i class='v'>u</i><sub>1</sub> stays flush with the edge. Rotating about <i class='v'>u</i><sub>1</sub>, or about the edge itself, stays in <i class='v'>M</i> and shrinks the box. Rotating about <i class='v'>u</i><sub>2</sub> or <i class='v'>u</i><sub>3</sub> tilts the face off the edge: the true volume kinks upward while <i class='v'>G</i> still falls."});
+  }
+  { const b=std(); const e1=seg(b.Pp[0],[0,0.8,0.6],0.5), e2=seg(b.Pm[0],[0,0.5,-0.85],0.4);
+    cs.push({id:"c",tab:"Two edges, opposite faces",...b,edges:[{axis:0,sign:1,...e1},{axis:0,sign:-1,...e2}],
+      motions:axisMotions(),
+      desc:"<b>Edges in the opposite faces &plusmn;<i class='v'>u</i><sub>1</sub>.</b> The two edges pin the direction <i class='v'>u</i><sub>1</sub> completely, but the box can still spin about it. That spin stays in <i class='v'>M</i> and <i class='v'>H</i>(<i class='v'>e</i><sub>1</sub>) &le; &minus;2, so it shrinks the box &mdash; this is the classical two-dimensional &ldquo;minimum rectangle is flush with an edge&rdquo; argument."});
+  }
+  { const b=std(); const e1=seg(b.Pp[0],[0,0.8,0.6],0.5), e2=seg(b.Pp[1],[0.7,0,0.714],0.5);
+    const A=cross(E[0],e1.a),B=cross(E[1],e2.a);
+    cs.push({id:"d",tab:"Two edges, adjacent faces",...b,edges:[{axis:0,sign:1,...e1},{axis:1,sign:1,...e2}],
+      motions:[{label:"slide along the curve M (both edges stay flush)",w0:unit(cross(A,B)),R:mCurve(0,e1.a,1,e2.a)},...axisMotions()],
+      desc:"<b>O&rsquo;Rourke&rsquo;s suspected local minimum: two edges on adjacent faces, four vertices.</b> Rotating about any of the three box axes breaks an edge contact and makes the box <em>bigger</em>, to first order &mdash; it really is a minimum in those directions. But the boxes that keep both edges flush form a curve <i class='v'>M</i>, and sliding along it the volume equals <i class='v'>G</i>, which has a strict local maximum at <i class='v'>t</i> = 0. This is the heart of the theorem."});
+  }
+  { const b=std(); const e1=seg(b.Pp[0],[0,1,0],0.5), e2=seg(b.Pp[1],[1,0,0],0.5);
+    cs.push({id:"e",tab:"Two edges, parallel to box edges",...b,edges:[{axis:0,sign:1,...e1},{axis:1,sign:1,...e2}],
+      motions:axisMotions(),
+      desc:"<b>Adjacent faces, with <i class='v'>a</i> &#8741; <i class='v'>u</i><sub>2</sub> and <i class='v'>b</i> &#8741; <i class='v'>u</i><sub>1</sub>.</b> Here the two constraint surfaces are tangent, so the implicit function theorem does not apply &mdash; but it is not needed: rotations about <i class='v'>u</i><sub>1</sub> (and also about <i class='v'>u</i><sub>2</sub>) keep both edges flush. Only the rotation about <i class='v'>u</i><sub>3</sub> breaks the contacts."});
+  }
+  { const p=0.35; const b=base(W,p,-0.3,0.4,[W[1]-W[0]*p,0.75,W[0]-W[1]*p,0.2,0.9,0.35]);
+    const e={a:[0,0,1],v0:[W[0],W[1],0.15],v1:[W[0],W[1],0.85]};
+    cs.push({id:"f",tab:"Edge along a box edge",...b,edges:[{axis:0,sign:1,...e},{axis:1,sign:1,...e}],
+      motions:[{label:"rotate about u₃ (hinge on the edge)",w0:E[2],R:rotAxis(E[2])},
+               {label:"rotate about u₁",w0:E[0],R:rotAxis(E[0])},{label:"rotate about u₂",w0:E[1],R:rotAxis(E[1])}],
+      desc:"<b>The paper&rsquo;s &ldquo;category D&rdquo; shape with nothing else: one polyhedron edge lying along a box edge.</b> It counts as two contacts (one edge, two faces). The curve <i class='v'>M</i> is the hinge rotation about that edge, i.e. about <i class='v'>u</i><sub>3</sub>, and it shrinks the box. A third contact is needed to stop it."});
+  }
+  { const b={w:[1,1,1],Pm:[[0,0,0],[0,0,0],[0,0,0]],Pp:[[1,1,1],[1,1,1],[1,1,1]]};
+    const e1={a:unit([0,1,1]),v0:[0,0,0],v1:[0,0.62,0.62]}, e2={a:unit([1,0,1]),v0:[0,0,0],v1:[0.62,0,0.62]};
+    cs.push({id:"g",tab:"Diagonal case",...b,edges:[{axis:0,sign:-1,...e1},{axis:1,sign:-1,...e2}],
+      motions:[{label:"slide along the curve M (both edges stay flush)",w0:unit([1,1,1]),R:mCurve(0,e1.a,1,e2.a)},
+               {label:"rotate about the diagonal d",w0:unit([1,1,1]),R:rotAxis([1,1,1]),inM:false,badge:"leaves M (edges lift off), yet F = G stays constant"},
+               {label:"rotate about u₃",w0:E[2],R:rotAxis(E[2])}],
+      desc:"<b>The only configuration where the Hessian degenerates.</b> The box is a cube and the polyhedron contains its space diagonal <i class='v'>d</i>; all six contact points are the two corners. The two flush edges run along face diagonals, and the curve <i class='v'>M</i> is tangent to the rotation about <i class='v'>d</i>, where <i class='v'>H</i> = 0. Rotating exactly about <i class='v'>d</i> keeps both <i class='v'>G</i> and the true volume constant, but it is <em>not</em> in <i class='v'>M</i>: the two edges lift off their faces and only the corners keep touching. The curve <i class='v'>M</i> itself must therefore leave that rotation, and then AM&ndash;GM makes <i class='v'>G</i> &mdash; and the true volume &mdash; strictly smaller. The decrease is only fourth-order here, so the curve is much flatter than in the other cases, but it is strict."});
+  }
+  for(const c of cs) finish(c);
+  return cs;
+}
+function finish(c){
+  // vertices: contact points on faces without an edge, plus edge endpoints
+  const vs=[]; const push=v=>{if(!vs.some(u=>len(sub(u,v))<1e-9))vs.push(v);};
+  for(let i=0;i<3;i++)for(const s of[1,-1]){
+    if(!c.edges.some(e=>e.axis===i&&e.sign===s)) push(s>0?c.Pp[i]:c.Pm[i]);}
+  for(const e of c.edges){push(e.v0);push(e.v1);}
+  c.verts=vs;
+  c.D=[0,1,2].map(i=>sub(c.Pp[i],c.Pm[i]));
+  c.pqr=[c.D[1][0]/c.w[1],c.D[2][0]/c.w[2],c.D[2][1]/c.w[2]];
+  c.V0=c.w[0]*c.w[1]*c.w[2];
+  // convex hull (brute force; tiny point sets)
+  const n=vs.length, tris=[], ek=new Set(); c.hedges=[];
+  const cen=sc(vs.reduce(add,[0,0,0]),1/n);
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)for(let k=j+1;k<n;k++){
+    let nn=cross(sub(vs[j],vs[i]),sub(vs[k],vs[i])); if(len(nn)<1e-9)continue; nn=unit(nn);
+    let pos=0,neg=0; for(let m=0;m<n;m++){const d=dot(nn,sub(vs[m],vs[i])); if(d>1e-9)pos++; else if(d<-1e-9)neg++;}
+    if(pos&&neg)continue;
+    if(dot(nn,sub(cen,vs[i]))>0)nn=sc(nn,-1);
+    tris.push({idx:[i,j,k],n:nn});
+    for(const[a,b]of[[i,j],[j,k],[i,k]]){const key=a+"-"+b;if(!ek.has(key)){ek.add(key);c.hedges.push([a,b]);}}
+  }
+  c.tris=tris;
+  // classify motions
+  for(const m of c.motions){
+    if(m.inM===undefined)m.inM=[-0.5,0.5,-0.25].every(d=>{const R=m.R(d*Math.PI/180);return Math.abs(volF(c,R)-volG(c,R))<1e-9;});
+    m.H=Hform(c.pqr,unit(m.w0));
+  }
+}
+function extents(c,R){return R.map(u=>{let lo=Infinity,hi=-Infinity;for(const v of c.verts){const d=dot(v,u);if(d<lo)lo=d;if(d>hi)hi=d;}return[lo,hi];});}
+function volF(c,R){return extents(c,R).reduce((a,[lo,hi])=>a*(hi-lo),1)/c.V0;}
+function volG(c,R){return R.reduce((a,u,i)=>a*dot(c.D[i],u),1)/c.V0;}
+function Hform([p,q,r],w){return -2*dot(w,w)+2*(p*w[0]*w[1]+q*w[0]*w[2]+r*w[1]*w[2])
+  -(p*w[2]-q*w[1])**2-(r*w[0]-p*w[2])**2-(q*w[1]-r*w[0])**2;}
+
+/* ---------- Figure 1 state ---------- */
+const cases=makeCases();
+let cur=cases[3], mot=cur.motions[0], tdeg=0, yaw=-0.62, pitch=0.42, playing=false;
+const $=id=>document.getElementById(id);
+const canvas=$("view"), ctx=canvas.getContext("2d");
+const TMAX=15;
+
+function selectCase(id,scroll){
+  cur=cases.find(c=>c.id===id); mot=cur.motions[0]; tdeg=0; $("tslider").value=0;
+  for(const b of $("casetabs").children)b.setAttribute("aria-pressed",b.dataset.id===id);
+  const sel=$("motion"); sel.innerHTML="";
+  cur.motions.forEach((m,i)=>{const o=document.createElement("option");o.value=i;
+    o.textContent=m.label+(m.inM?"  — stays in M":"  — leaves M");sel.appendChild(o);});
+  $("casedesc").innerHTML=cur.desc;
+  buildPlot(); update();
+  if(scroll)$("fig1").scrollIntoView({behavior:"smooth",block:"start"});
+}
+cases.forEach(c=>{const b=document.createElement("button");b.textContent=c.tab;b.dataset.id=c.id;
+  b.onclick=()=>selectCase(c.id);$("casetabs").appendChild(b);});
+document.querySelectorAll("a[data-case]").forEach(a=>a.onclick=()=>selectCase(a.dataset.case,true));
+$("motion").onchange=e=>{mot=cur.motions[+e.target.value];tdeg=0;$("tslider").value=0;buildPlot();update();};
+$("tslider").oninput=e=>{tdeg=+e.target.value;update();};
+$("showD").onchange=$("showGhost").onchange=()=>draw3d();
+$("play").onclick=()=>{playing=!playing;$("play").innerHTML=playing?"&#10073;&#10073; pause":"&#9654; animate";
+  if(playing){const t0=performance.now()-Math.asin(tdeg/12||0)*1400;
+    const step=now=>{if(!playing)return;tdeg=12*Math.sin((now-t0)/1400);$("tslider").value=tdeg;update();requestAnimationFrame(step);};
+    requestAnimationFrame(step);}};
+
+function update(){
+  const R=mot.R(tdeg*Math.PI/180), f=volF(cur,R), g=volG(cur,R);
+  $("roN").textContent=cur.edges.length+(cur.id==="f"?"  (one edge, two faces)":"");
+  $("roM").innerHTML="<span class='badge'>"+(mot.badge?mot.badge:mot.inM?"stays in M: F = G":"leaves M: a contact breaks, F > G")+"</span>";
+  $("roH").textContent=fmt(Math.abs(mot.H)<5e-10?0:mot.H,3)+(Math.abs(mot.H)<5e-10?"  (degenerate)":"");
+  $("roX").textContent="("+cur.pqr.map(v=>fmt(v,2)).join(", ")+")";
+  $("roT").textContent=fmt(tdeg,1)+"°";
+  $("roV").textContent="F = "+f.toFixed(5)+"   G = "+g.toFixed(5);
+  moveMarker(f,g); draw3d();
+}
+
+/* ---------- 3D view ---------- */
+function resize(){const r=canvas.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0);draw3d();}
+function draw3d(){
+  const r=canvas.getBoundingClientRect(),Wd=r.width,Hd=r.height; if(!Wd)return;
+  ctx.clearRect(0,0,Wd,Hd);
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+  const ctr=sc(cur.w,0.5), S=0.78*Math.min(Wd,Hd)/len(cur.w);
+  const P=v=>{const x=v[0]-ctr[0],y=v[1]-ctr[1],z=v[2]-ctr[2];
+    const x1=x*cy-y*sy,y1=x*sy+y*cy; return[Wd/2+S*x1,Hd/2-S*(y1*sp+z*cp),y1*cp-z*sp];};
+  const toCam=[-sy*cp,-cy*cp,sp];
+  const cText=css("--text"),cText2=css("--text2"),cMuted=css("--muted"),cS2=css("--s2"),cS3=css("--s3"),poly=css("--poly");
+  const line=(a,b)=>{const p=P(a),q=P(b);ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(q[0],q[1]);ctx.stroke();};
+  const boxGeom=R=>{const ex=extents(cur,R);
+    const corner=bits=>{let v=[0,0,0];for(let i=0;i<3;i++)v=add(v,sc(R[i],ex[i][(bits>>i)&1]));return v;};
+    const edges=[];
+    for(let b=0;b<8;b++)for(let k=0;k<3;k++)if(!((b>>k)&1)){
+      let front=false;for(let m=0;m<3;m++)if(m!==k){const s=((b>>m)&1)?1:-1;if(dot(sc(R[m],s),toCam)>0)front=true;}
+      edges.push({a:corner(b),b:corner(b|(1<<k)),front});}
+    return{ex,edges,corner};};
+  const R=mot.R(tdeg*Math.PI/180), box=boxGeom(R);
+  // ghost of starting box
+  if($("showGhost").checked&&Math.abs(tdeg)>1e-9){ctx.strokeStyle=cMuted;ctx.lineWidth=1;ctx.setLineDash([3,4]);
+    for(const e of boxGeom(E).edges)line(e.a,e.b);ctx.setLineDash([]);}
+  // back edges of box
+  ctx.strokeStyle=cMuted;ctx.lineWidth=1;for(const e of box.edges)if(!e.front)line(e.a,e.b);
+  // polyhedron faces, back to front
+  const tr=cur.tris.map(t=>{const ps=t.idx.map(i=>P(cur.verts[i]));return{t,ps,z:(ps[0][2]+ps[1][2]+ps[2][2])/3};}).sort((a,b)=>b.z-a.z);
+  const L=unit([0.3,-0.5,0.8]);
+  for(const{t,ps}of tr){const sh=0.72+0.28*Math.abs(dot(t.n,L));
+    const[c0,c1,c2]=poly.split(",").map(x=>Math.min(255,Math.round(+x*sh*1.15)));
+    ctx.fillStyle=`rgba(${c0},${c1},${c2},0.62)`;ctx.beginPath();ctx.moveTo(ps[0][0],ps[0][1]);ctx.lineTo(ps[1][0],ps[1][1]);ctx.lineTo(ps[2][0],ps[2][1]);ctx.closePath();ctx.fill();}
+  ctx.strokeStyle=cText2;ctx.lineWidth=1;for(const[a,b]of cur.hedges)line(cur.verts[a],cur.verts[b]);
+  // chords and contact points
+  if($("showD").checked){ctx.strokeStyle=cS2;ctx.lineWidth=2;ctx.setLineDash([5,4]);
+    for(let i=0;i<3;i++)line(cur.Pm[i],cur.Pp[i]);ctx.setLineDash([]);}
+  // flush edges
+  ctx.strokeStyle=cS3;ctx.lineWidth=5;ctx.lineCap="round";for(const e of cur.edges)line(e.v0,e.v1);ctx.lineCap="butt";
+  const surf=css("--surface");
+  for(const pt of[...cur.Pm,...cur.Pp]){const p=P(pt);ctx.beginPath();ctx.arc(p[0],p[1],5,0,7);ctx.fillStyle=cS2;ctx.fill();
+    ctx.strokeStyle=surf;ctx.lineWidth=2;ctx.stroke();}
+  // front edges of box
+  ctx.strokeStyle=cText;ctx.lineWidth=1.6;for(const e of box.edges)if(e.front)line(e.a,e.b);
+  // axis labels on + faces
+  ctx.font="13px system-ui,sans-serif";ctx.fillStyle=cText2;ctx.textAlign="center";ctx.textBaseline="middle";
+  const mid=[0,1,2].map(i=>(box.ex[i][0]+box.ex[i][1])/2);
+  for(let i=0;i<3;i++){let v=[0,0,0];for(let j=0;j<3;j++)v=add(v,sc(R[j],j===i?box.ex[j][1]+0.11*len(cur.w):mid[j]));
+    const p=P(v);ctx.fillText("+"+AX[i],p[0],p[1]);}
+}
+let drag=null;
+canvas.addEventListener("pointerdown",e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener("pointermove",e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*0.008;
+  pitch=Math.max(-1.5,Math.min(1.5,pitch+(e.clientY-drag[1])*0.008));drag=[e.clientX,e.clientY];draw3d();});
+canvas.addEventListener("pointerup",()=>drag=null);canvas.addEventListener("pointercancel",()=>drag=null);
+window.addEventListener("resize",resize);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{buildPlot();update();drawBound();drawEig();});
+
+/* ---------- plot ---------- */
+const PL={l:64,r:14,t:12,b:34,W:420,H:260}; let plotData=null;
+function niceTicks(lo,hi,n){const span=hi-lo,raw=span/n,mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  const st=[1,2,2.5,5,10].map(m=>m*mag).find(s=>span/s<=n)||raw;const out=[];
+  for(let v=Math.ceil(lo/st-1e-9)*st;v<=hi+1e-9;v+=st)out.push(v);return{out,st};}
+function buildPlot(){
+  const N=240,ts=[],fs=[],gs=[];
+  for(let i=0;i<=N;i++){const t=-TMAX+2*TMAX*i/N,R=mot.R(t*Math.PI/180);ts.push(t);fs.push(volF(cur,R));gs.push(volG(cur,R));}
+  let lo=Math.min(...fs,...gs,1),hi=Math.max(...fs,...gs,1);const pad=(hi-lo)*0.08||0.01;lo-=pad;hi+=pad;
+  const x=t=>PL.l+(t+TMAX)/(2*TMAX)*(PL.W-PL.l-PL.r), y=v=>PL.t+(hi-v)/(hi-lo)*(PL.H-PL.t-PL.b);
+  plotData={ts,fs,gs,x,y,lo,hi};
+  const path=a=>a.map((v,i)=>(i?"L":"M")+x(ts[i]).toFixed(1)+" "+y(v).toFixed(1)).join("");
+  const yt=niceTicks(lo,hi,5),dec=Math.max(2,Math.min(5,-Math.floor(Math.log10(yt.st))+(String(yt.st).includes("25")?1:0)));
+  let s="";
+  for(const v of yt.out)s+=`<line x1="${PL.l}" x2="${PL.W-PL.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/>
+    <text x="${PL.l-6}" y="${y(v)+4}" text-anchor="end" font-size="11" fill="var(--text2)">${v.toFixed(dec)}</text>`;
+  for(const t of[-15,-10,-5,0,5,10,15])s+=`<text x="${x(t)}" y="${PL.H-PL.b+15}" text-anchor="middle" font-size="11" fill="var(--text2)">${t}°</text>`;
+  s+=`<line x1="${x(0)}" x2="${x(0)}" y1="${PL.t}" y2="${PL.H-PL.b}" stroke="var(--border)"/>`;
+  s+=`<text x="${(PL.l+PL.W-PL.r)/2}" y="${PL.H-4}" text-anchor="middle" font-size="11" fill="var(--text2)">motion parameter t</text>`;
+  s+=`<text transform="translate(11 ${(PL.t+PL.H-PL.b)/2}) rotate(-90)" text-anchor="middle" font-size="11" fill="var(--text2)">volume / starting volume</text>`;
+  s+=`<path d="${path(fs)}" fill="none" stroke="var(--s1)" stroke-width="2"/>`;
+  s+=`<path d="${path(gs)}" fill="none" stroke="var(--s2)" stroke-width="2" stroke-dasharray="6 5"/>`;
+  s+=`<line id="hx" y1="${PL.t}" y2="${PL.H-PL.b}" stroke="var(--muted)" stroke-dasharray="2 3" visibility="hidden"/>`;
+  s+=`<line id="mk" y1="${PL.t}" y2="${PL.H-PL.b}" stroke="var(--text2)"/>`;
+  s+=`<circle id="mg" r="4.5" fill="var(--s2)" stroke="var(--surface)" stroke-width="2"/>`;
+  s+=`<circle id="mf" r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"/>`;
+  s+=`<rect id="hit" x="${PL.l}" y="${PL.t}" width="${PL.W-PL.l-PL.r}" height="${PL.H-PL.t-PL.b}" fill="transparent" style="cursor:crosshair"/>`;
+  $("plot").innerHTML=s;
+  const hit=$("hit"),tip=$("tip"),svg=$("plot");
+  const tAt=e=>{const r=svg.getBoundingClientRect(),px=(e.clientX-r.left)/r.width*PL.W;
+    return Math.max(-TMAX,Math.min(TMAX,(px-PL.l)/(PL.W-PL.l-PL.r)*2*TMAX-TMAX));};
+  hit.onpointermove=e=>{const t=tAt(e),R=mot.R(t*Math.PI/180);
+    $("hx").setAttribute("x1",x(t));$("hx").setAttribute("x2",x(t));$("hx").setAttribute("visibility","visible");
+    tip.style.display="block";tip.textContent=`t = ${fmt(t,1)}°   F = ${volF(cur,R).toFixed(4)}   G = ${volG(cur,R).toFixed(4)}`;
+    const wr=$("plotwrap").getBoundingClientRect();
+    tip.style.left=Math.min(wr.width-tip.offsetWidth-4,Math.max(4,e.clientX-wr.left-tip.offsetWidth/2))+"px";
+    tip.style.top=Math.max(2,e.clientY-wr.top-34)+"px";
+    if(e.buttons){tdeg=Math.round(t*10)/10;$("tslider").value=tdeg;update();}};
+  hit.onpointerdown=e=>{tdeg=Math.round(tAt(e)*10)/10;$("tslider").value=tdeg;update();};
+  hit.onpointerleave=()=>{tip.style.display="none";$("hx").setAttribute("visibility","hidden");};
+}
+function moveMarker(f,g){if(!plotData)return;const{x,y}=plotData;
+  $("mk").setAttribute("x1",x(tdeg));$("mk").setAttribute("x2",x(tdeg));
+  $("mf").setAttribute("cx",x(tdeg));$("mf").setAttribute("cy",y(f));
+  $("mg").setAttribute("cx",x(tdeg));$("mg").setAttribute("cy",y(g));}
+
+/* ---------- Figure 2: the bound |p| <= 1 ---------- */
+function drawBound(){
+  const p=+$("bp").value,rho=+$("br").value; $("bpo").textContent=fmt(p,2);$("bro").textContent=rho.toFixed(2);
+  const w1=rho,w2=1,S=Math.min(190/w1,130/w2),ox=180-S*w1/2,oy=125+S*w2/2;
+  const X=v=>ox+S*v,Y=v=>oy-S*v;
+  const ok1=Math.abs(p*w1)<=w2+1e-9, ok2=Math.abs(p*w2)<=w1+1e-9;
+  const y0=(w2-p*w1)/2,x0=(w1-p*w2)/2;
+  const chord=(x1,y1,x2,y2,ok,lab,lx,ly)=>`<line x1="${X(x1)}" y1="${Y(y1)}" x2="${X(x2)}" y2="${Y(y2)}" stroke="var(--s2)" stroke-width="2" ${ok?"":'stroke-dasharray="3 3"'}/>
+    <circle cx="${X(x1)}" cy="${Y(y1)}" r="4.5" fill="var(--s2)" stroke="var(--surface)" stroke-width="2"/>
+    <circle cx="${X(x2)}" cy="${Y(y2)}" r="4.5" fill="var(--s2)" stroke="var(--surface)" stroke-width="2"/>
+    <text x="${X(lx)}" y="${Y(ly)}" font-size="12" fill="var(--text)" text-anchor="middle">${lab}${ok?"":" ✗"}</text>`;
+  let s=`<rect x="${X(0)}" y="${Y(w2)}" width="${S*w1}" height="${S*w2}" fill="none" stroke="var(--text)" stroke-width="1.6"/>`;
+  s+=`<text x="${X(w1/2)}" y="${Y(0)+16}" font-size="11" fill="var(--text2)" text-anchor="middle">w₁</text>`;
+  s+=`<text x="${X(0)-10}" y="${Y(w2/2)+4}" font-size="11" fill="var(--text2)" text-anchor="end">w₂</text>`;
+  s+=chord(0,y0,w1,y0+p*w1,ok1,"D₁",w1*0.22,y0+p*w1*0.22+0.09);
+  s+=chord(x0,0,x0+p*w2,w2,ok2,"D₂",x0+p*w2*0.8+0.13*(p>=0?1:-1),w2*0.8-0.03);
+  $("boundsvg").innerHTML=s;
+  const lim=Math.min(rho,1/rho);
+  $("bstat").innerHTML=`min(ρ, 1/ρ) = ${lim.toFixed(2)} &nbsp;→&nbsp; `+
+    (ok1&&ok2?`<b>✓ feasible</b>: both chords fit in the box.`:
+     `<b>✗ infeasible</b>: chord ${!ok1&&!ok2?"D₁ and D₂ leave":(!ok1?"D₁ leaves":"D₂ leaves")} the box, so no such contact points exist.`);
+}
+$("bp").oninput=$("br").oninput=drawBound;
+
+/* ---------- Figure 3: eigenvalues of H ---------- */
+function eig3(a){const[a11,a12,a13,a22,a23,a33]=a,p1=a12*a12+a13*a13+a23*a23,q=(a11+a22+a33)/3;
+  const p2=(a11-q)**2+(a22-q)**2+(a33-q)**2+2*p1,p=Math.sqrt(p2/6); if(p<1e-12)return[q,q,q];
+  const b11=(a11-q)/p,b22=(a22-q)/p,b33=(a33-q)/p,b12=a12/p,b13=a13/p,b23=a23/p;
+  const det=b11*(b22*b33-b23*b23)-b12*(b12*b33-b23*b13)+b13*(b12*b23-b22*b13);
+  const phi=Math.acos(Math.max(-1,Math.min(1,det/2)))/3;
+  const e1=q+2*p*Math.cos(phi),e3=q+2*p*Math.cos(phi+2*Math.PI/3);return[e1,3*q-e1-e3,e3];}
+function drawEig(){
+  const p=+$("hp").value,q=+$("hq").value,r=+$("hr").value;
+  $("hpo").textContent=fmt(p,2);$("hqo").textContent=fmt(q,2);$("hro").textContent=fmt(r,2);
+  const ev=eig3([-2-2*r*r,p+q*r,q+p*r,-2-2*q*q,r+p*q,-2-2*p*p]);
+  const lo=-12,hi=2,x=v=>20+(Math.max(lo,v)-lo)/(hi-lo)*320,y=62;
+  let s=`<rect x="${x(0)}" y="30" width="${x(hi)-x(0)}" height="64" fill="var(--s2)" opacity="0.10"/>`;
+  s+=`<line x1="${x(lo)}" x2="${x(hi)}" y1="${y}" y2="${y}" stroke="var(--muted)"/>`;
+  for(let v=lo;v<=hi;v+=2)s+=`<line x1="${x(v)}" x2="${x(v)}" y1="${y-4}" y2="${y+4}" stroke="var(--muted)"/>
+    <text x="${x(v)}" y="${y+20}" font-size="11" text-anchor="middle" fill="var(--text2)">${v<0?"−"+(-v):v}</text>`;
+  s+=`<line x1="${x(0)}" x2="${x(0)}" y1="26" y2="98" stroke="var(--text)" stroke-width="1.4"/>`;
+  s+=`<text x="${x(0)-6}" y="22" font-size="11" text-anchor="end" fill="var(--text2)">shaded: H &gt; 0, excluded by Lemma 2 →</text>`;
+  s+=`<text x="${x(lo)}" y="112" font-size="11" fill="var(--text2)">eigenvalues of H</text>`;
+  for(const e of ev)s+=`<circle cx="${x(e)}" cy="${y}" r="6" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"><title>${e.toFixed(3)}</title></circle>`;
+  $("eigsvg").innerHTML=s;
+  const mx=ev[0],inside=Math.max(Math.abs(p),Math.abs(q),Math.abs(r))<=1;
+  $("hstat").innerHTML=`eigenvalues: ${ev.map(e=>fmt(Math.abs(e)<5e-7?0:e,3)).join(", ")}<br>`+
+    (!inside?(mx>1e-6?"<b>✗ indefinite</b> — but a value beyond ±1 is excluded by Lemma 2."
+                     :"negative definite here, although a value beyond ±1 is excluded by Lemma 2 anyway.")
+     :(mx>-1e-6?"<b>semidefinite</b>: the diagonal case; the null direction is the cube diagonal."
+               :"<b>✓ negative definite</b>: every rotation direction decreases <i class='v'>G</i>."));
+}
+for(const id of["hp","hq","hr"])$(id).oninput=drawEig;
+document.querySelectorAll("button[data-h]").forEach(b=>b.onclick=()=>{const v=b.dataset.h.split(",");
+  $("hp").value=v[0];$("hq").value=v[1];$("hr").value=v[2];drawEig();});
+
+/* ---------- init ---------- */
+{ const h=new URLSearchParams(location.hash.slice(1)); // deep link: #case=g&t=8
+  selectCase(cases.some(c=>c.id===h.get("case"))?h.get("case"):"d");
+  if(h.get("t")){tdeg=Math.max(-TMAX,Math.min(TMAX,+h.get("t")||0));$("tslider").value=tdeg;update();} }
+resize(); drawBound(); drawEig();
+window.__cases=cases;
+</script>
+</body>
+</html>
