@@ -55,7 +55,7 @@ This generates a JSON file with the convex hull (vertices and faces), the OBB (c
 
 # The Algorithm
 
-The code in this repository utilizes my research on minimum OBB computation from 2015: [An Exact Algorithm for Finding Minimum Oriented Bounding Boxes](minobb_jylanki_2015_06_01.pdf).
+The code in this repository utilizes my research on minimum OBB computation from 2015: [An Exact Algorithm for Finding Minimum Oriented Bounding Boxes](https://juj.github.io/minobb/site/minobb_jylanki_2015_06_01.pdf).
 
 The main idea of the algorithm is the observation that the minimum volume OBB is spanned by three distinct edge-face contacts of the polyhedron and the OBB. The algorithm enumerates combinations of such edge-face contacts quickly to find the minimum one. These combinations fall into distinct category classes. See [the contact categories A–D](https://juj.github.io/minobb/site/cases.html) for an example polyhedron of each.
 
