@@ -36,7 +36,7 @@ int main()
 c++ -O2 -std=c++17 example.cpp minobb.cpp convex_hull.cpp -o example
 ```
 
-The above program computes the minimum volume OBB for the given point set. As a necessary intermediate step, the convex hull of the object needs to be computed. Adjust the `tolerance` parameter of `minobb()` to control the precision-vs-speed tradeoff. Pass `tolerance=0` to compute the exact box. For spherical and cylindrical shapes with hundreds of thousands of vertices, this can take several minutes. By default `tolerance=0.0015`, to quickly produce an OBB that is at most 0.15% larger than the minimum.
+The above program computes the minimum volume OBB for the given point set. As a necessary intermediate step, the convex hull of the object needs to be computed. Adjust the `tolerance` parameter of `minobb()` to control the precision-vs-speed tradeoff.
 
 The box is returned as its center `pos`, its half extents `r` and its three orthonormal axes `axis[0..2]`: a point `p` is inside the OBB if `|dot(axis[i], p - pos)| <= r[i]` for each `i`.
 
