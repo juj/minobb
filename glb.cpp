@@ -191,6 +191,44 @@ double component(const char *p, long long type, bool normalized)
 	}
 }
 
+// The elements of an accessor: `count` of them, each with a fixed number of components of one type.
+struct Elements
+{
+	const char *data = nullptr;
+	size_t count = 0, stride = 0, size = 0; // (size: the bytes of a component.)
+	long long type = 0;                     // The glTF componentType.
+	bool normalized = false;
+
+	double get(size_t element, int k) const { return component(data + element * stride + k * size, type, normalized); }
+};
+
+enum AccessorStatus { Missing, Unsupported, OutOfBounds, Ok };
+
+// Looks up the accessor of the given index and element type ("VEC3", "VEC4" or "MAT4"), and checks that all
+// of its data is inside its buffer.
+AccessorStatus read_accessor(const Json &root, const std::vector<std::string> &buffers, const Json &index, const char *type, Elements &e)
+{
+	const Json &accessor = root["accessors"].at(index.uint());
+	if (accessor.type == Json::Null) return Missing;
+	const Json &view = root["bufferViews"].at(accessor["bufferView"].uint());
+	if (accessor["type"].str != type || view.type == Json::Null || accessor["sparse"].type != Json::Null) return Unsupported;
+
+	const long long buffer = view["buffer"].uint();
+	e.type = accessor["componentType"].uint();
+	e.size = e.type == 5120 || e.type == 5121 ? 1 : e.type == 5122 || e.type == 5123 ? 2 : 4;
+	e.count = (size_t)accessor["count"].uint(0);
+	const size_t elementSize = (type[0] == 'M' ? 16 : type[3] - '0') * e.size;
+	e.stride = std::max((size_t)view["byteStride"].uint(0), elementSize);
+	const size_t offset = (size_t)view["byteOffset"].uint(0) + (size_t)accessor["byteOffset"].uint(0);
+	const size_t available = buffer >= 0 && buffer < (long long)buffers.size() ? buffers[buffer].size() : 0;
+	if (e.count && (available < elementSize || offset > available - elementSize
+		|| e.count - 1 > (available - elementSize - offset) / e.stride))
+		return OutOfBounds;
+	e.data = e.count ? buffers[buffer].data() + offset : nullptr;
+	e.normalized = accessor["normalized"].num != 0;
+	return Ok;
+}
+
 } // ~namespace
 
 bool glb_read_positions(const char *path, std::vector<float> &pts, std::string &error)
@@ -242,48 +280,106 @@ bool glb_read_positions(const char *path, std::vector<float> &pts, std::string &
 	for (const Json &node : nodes.items)
 		for (const Json &child : node["children"].items)
 			if (nodes.at(child.uint()).type == Json::Object) visited[child.uint()] = 1;
+
+	// The world transform of every node, for the joints of the skins: a walk over the whole hierarchy, from
+	// the nodes that have no parent.
+	std::vector<Mat> world(nodes.items.size(), identity);
+	for (size_t i = 0; i < visited.size(); ++i)
+		if (!visited[i]) stack.push_back({ (long long)i, identity });
+	std::vector<char> placed(nodes.items.size(), 0);
+	while (!stack.empty())
+	{
+		const long long index = stack.back().first;
+		const Json &node = nodes.at(index);
+		if (node.type != Json::Object || placed[index]) { stack.pop_back(); continue; }
+		placed[index] = 1;
+		world[index] = stack.back().second * node_transform(node);
+		stack.pop_back();
+		for (const Json &child : node["children"].items) stack.push_back({ child.uint(), world[index] });
+	}
+
 	for (size_t i = 0; i < visited.size(); ++i)
 		if (scenes.items.empty() && !visited[i]) stack.push_back({ (long long)i, identity });
 	for (const Json &node : scenes.at(root["scene"].uint(0))["nodes"].items) stack.push_back({ node.uint(), identity });
 	visited.assign(visited.size(), 0);
 
 	// Traverse the node hierarchy, collecting the positions of the meshes on the way.
+	std::vector<Mat> jointMatrices;
+	std::vector<Elements> joints, weights;
 	while (!stack.empty())
 	{
 		const long long index = stack.back().first;
 		const Json &node = nodes.at(index);
 		if (node.type != Json::Object || visited[index]) { stack.pop_back(); continue; }
 		visited[index] = 1;
-		const Mat world = stack.back().second * node_transform(node);
+		const Mat nodeToWorld = stack.back().second * node_transform(node);
 		stack.pop_back();
-		for (const Json &child : node["children"].items) stack.push_back({ child.uint(), world });
+		for (const Json &child : node["children"].items) stack.push_back({ child.uint(), nodeToWorld });
+
+		// The mesh of a node with a skin is posed by the joints of the skin: each vertex goes where its joints
+		// take it, by the transform of the joint node times the inverse bind matrix of the joint, weighted by
+		// the weights of the vertex. (The transform of the node itself does not apply to such a mesh.) The
+		// joints are where the nodes of the file have them: animations are not applied.
+		const Json &skin = root["skins"].at(node["skin"].uint());
+		jointMatrices.clear();
+		if (skin.type == Json::Object)
+		{
+			Elements inverseBind;
+			const AccessorStatus status = read_accessor(root, buffers, skin["inverseBindMatrices"], "MAT4", inverseBind);
+			if (status == Unsupported || status == OutOfBounds || (status == Ok && inverseBind.type != 5126))
+				return fail("unsupported inverse bind matrices of a skin");
+			for (size_t j = 0; j < skin["joints"].items.size(); ++j)
+			{
+				const long long joint = skin["joints"].at((long long)j).uint();
+				Mat bind = identity;
+				if (status == Ok && j < inverseBind.count)
+					for (int k = 0; k < 12; ++k) bind.m[k] = inverseBind.get(j, k / 3 * 4 + k % 3);
+				jointMatrices.push_back((joint >= 0 && joint < (long long)world.size() ? world[joint] : identity) * bind);
+			}
+		}
 
 		for (const Json &primitive : root["meshes"].at(node["mesh"].uint())["primitives"].items)
 		{
-			const Json &accessor = root["accessors"].at(primitive["attributes"]["POSITION"].uint());
-			const Json &view = root["bufferViews"].at(accessor["bufferView"].uint());
-			if (accessor.type == Json::Null) continue;
-			if (accessor["type"].str != "VEC3" || view.type == Json::Null || accessor["sparse"].type != Json::Null)
-				return fail("unsupported POSITION accessor (sparse or compressed data?)");
+			Elements positions;
+			const AccessorStatus status = read_accessor(root, buffers, primitive["attributes"]["POSITION"], "VEC3", positions);
+			if (status == Missing) continue;
+			if (status == Unsupported) return fail("unsupported POSITION accessor (sparse or compressed data?)");
+			if (status == OutOfBounds) return fail("POSITION data is out of the bounds of its buffer");
 
-			const long long type = accessor["componentType"].uint(), buffer = view["buffer"].uint();
-			const size_t size = type == 5120 || type == 5121 ? 1 : type == 5122 || type == 5123 ? 2 : 4;
-			const size_t count = (size_t)accessor["count"].uint(0);
-			const size_t stride = std::max((size_t)view["byteStride"].uint(0), 3 * size);
-			const size_t offset = (size_t)view["byteOffset"].uint(0) + (size_t)accessor["byteOffset"].uint(0);
-			const size_t available = buffer >= 0 && buffer < (long long)buffers.size() ? buffers[buffer].size() : 0;
-			if (count && (available < 3 * size || offset > available - 3 * size
-				|| count - 1 > (available - 3 * size - offset) / stride))
-				return fail("POSITION data is out of the bounds of its buffer");
-
-			const bool normalized = accessor["normalized"].num != 0;
-			for (size_t i = 0; i < count; ++i)
+			// The joints and weights of the vertices: four of each per set, in the attributes JOINTS_0 and
+			// WEIGHTS_0, JOINTS_1 and WEIGHTS_1, and so on.
+			joints.clear();
+			weights.clear();
+			for (int set = 0; !jointMatrices.empty(); ++set)
 			{
-				const char *p = buffers[buffer].data() + offset + i * stride;
-				double v[3];
-				for (int k = 0; k < 3; ++k) v[k] = component(p + k * size, type, normalized);
-				for (int k = 0; k < 3; ++k)
-					pts.push_back((float)(world.m[k] * v[0] + world.m[3 + k] * v[1] + world.m[6 + k] * v[2] + world.m[9 + k]));
+				Elements j, w;
+				const AccessorStatus haveJoints = read_accessor(root, buffers, primitive["attributes"][("JOINTS_" + std::to_string(set)).c_str()], "VEC4", j);
+				const AccessorStatus haveWeights = read_accessor(root, buffers, primitive["attributes"][("WEIGHTS_" + std::to_string(set)).c_str()], "VEC4", w);
+				if (haveJoints == Missing || haveWeights == Missing) break;
+				if (haveJoints != Ok || haveWeights != Ok || j.count < positions.count || w.count < positions.count)
+					return fail("unsupported JOINTS or WEIGHTS accessor");
+				joints.push_back(j);
+				weights.push_back(w);
+			}
+
+			for (size_t i = 0; i < positions.count; ++i)
+			{
+				const double v[3] = { positions.get(i, 0), positions.get(i, 1), positions.get(i, 2) };
+				double p[3] = { 0, 0, 0 }, total = 0;
+				for (size_t set = 0; set < joints.size(); ++set)
+					for (int k = 0; k < 4; ++k)
+					{
+						const double weight = weights[set].get(i, k), joint = joints[set].get(i, k);
+						if (!(weight > 0) || !(joint < (double)jointMatrices.size())) continue;
+						const Mat &m = jointMatrices[(size_t)joint];
+						for (int c = 0; c < 3; ++c) p[c] += weight * (m.m[c] * v[0] + m.m[3 + c] * v[1] + m.m[6 + c] * v[2] + m.m[9 + c]);
+						total += weight;
+					}
+				// (The weights of a vertex are to add up to one. Where they do not, they are scaled to; and a
+				// vertex with no weight at all stays with the node, like the vertices of a mesh without a skin.)
+				for (int c = 0; c < 3; ++c)
+					pts.push_back((float)(total > 0 ? p[c] / total
+						: nodeToWorld.m[c] * v[0] + nodeToWorld.m[3 + c] * v[1] + nodeToWorld.m[6 + c] * v[2] + nodeToWorld.m[9 + c]));
 			}
 		}
 	}

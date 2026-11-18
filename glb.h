@@ -15,9 +15,9 @@
 // The POSITION attribute of every mesh primitive that the scene's node
 // hierarchy instantiates is transformed to world space and appended to `pts`
 // as packed xyz float triples (a mesh used by several nodes contributes once
-// per node). Skinning, morph targets and animations are not applied, i.e. the
-// meshes stay in their bind pose. Sparse and compressed (Draco, meshopt)
-// position data is not supported.
+// per node). A mesh with a skin is posed by the joints of the skin, where the
+// nodes of the file have them. Animations and morph targets are not applied.
+// Sparse and compressed (Draco, meshopt) position data is not supported.
 //
 // Returns false on failure, with a description of the problem in `error`.
 bool glb_read_positions(const char *path, std::vector<float> &pts, std::string &error);

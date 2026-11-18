@@ -36,10 +36,10 @@
 <div id="hud">
   <div id="hudtext">loading...</div>
   <label id="lbl-object"><input type="checkbox" id="cb-object" checked> Show object</label>
-  <label id="lbl-hull"><input type="checkbox" id="cb-hull" checked> Show Convex Hull</label>
-  <label id="lbl-hulltri"><input type="checkbox" id="cb-hulltri"> Show hull triangles (red)</label>
-  <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB</label>
-  <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB</label>
+  <label id="lbl-hull" style='display:none'><input type="checkbox" id="cb-hull" checked> Show Convex Hull (white)</label>
+  <label id="lbl-hulltri"><input type="checkbox" id="cb-hulltri"> Show hull triangles (blue)</label>
+  <label id="lbl-obb"><input type="checkbox" id="cb-obb" checked> Show OBB (orange)</label>
+  <label id="lbl-aabb"><input type="checkbox" id="cb-aabb" checked> Show AABB (purple)</label>
   <hr>
   <label id="lbl-dark"><input type="checkbox" id="cb-dark" checked> Dark Mode</label>
 </div>
@@ -76,8 +76,14 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-function fitCamera(object) {
+// Points the camera at the object, and at the given box as well (that of the overlays), if any.
+function fitCamera(object, overlayBox) {
+  // The box of a skinned mesh is measured where its bones take it, and before the first frame is drawn the
+  // bones are not where they will be: so the matrices of the whole scene are brought up to date first.
+  scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(object);
+  if (overlayBox) box.union(overlayBox);
+  if (box.isEmpty()) return;
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -199,6 +205,16 @@ function drawAABB(aabb) {
   return group;
 }
 
+// A volume as text: with three decimals, or if it is too small for those to show anything (under 0.001),
+// in scientific notation, like 0.503e-3.
+function formatVolume(v) {
+  if (!(Math.abs(v) < 0.001) || v === 0) return v.toFixed(3);
+  let exponent = Math.floor(Math.log10(Math.abs(v))) + 1;
+  let mantissa = v / Math.pow(10, exponent);
+  if (Math.abs(mantissa).toFixed(3) === '1.000') { mantissa /= 10; ++exponent; } // (Rounded up to 1: say 0.100 of the next power.)
+  return mantissa.toFixed(3) + 'e' + exponent;
+}
+
 // Exact volume of a closed polyhedron (divergence theorem):
 // V = |sum over fan triangles of det[a b c]| / 6 (n-gon faces are
 // fan-triangulated from their first vertex).
@@ -285,7 +301,7 @@ function fail(msg) {
 }
 
 if (!url) {
-  fail('no ?url= query parameter.\nusage: view.html?url=test/glb/.../foo.glb');
+  fail('no ?url= query parameter.\nusage: view.html?url=../test/glb/.../foo.glb');
 } else {
   hudText.textContent = 'loading ' + url + ' ...';
   new GLTFLoader().load(
@@ -299,6 +315,7 @@ if (!url) {
       // minobb_glb computes the hull/OBB in scene (world) space over all
       // meshes, so the overlays are added to the scene root.
       let overlays = 'none (no sibling .json)';
+      let overlayBox = null; // The box of all the points that the hull and the boxes were computed from.
       const jsonUrl = url.replace(/\.glb$/i, '.json');
       try {
         const resp = await fetch(jsonUrl);
@@ -333,6 +350,7 @@ if (!url) {
             obbOk = true;
           }
           if (data.aabb_vertices) {
+            overlayBox = new THREE.Box3(new THREE.Vector3(...data.aabb_vertices.min), new THREE.Vector3(...data.aabb_vertices.max));
             const g = drawAABB({ ...data.aabb_vertices, color: 0x44ff44 }); // green: all vertices
             g.visible = cbAABB.checked;
             parent.add(g);
@@ -363,7 +381,7 @@ if (!url) {
           if (vols.length) {
             stats += '\nvolume:';
             for (const [name, v] of vols)
-              stats += '\n  ' + name.padEnd(15) + v.toFixed(3);
+              stats += '\n  ' + name.padEnd(15) + formatVolume(v);
           }
           if (data.obb && data.obb.axes) {
             stats += '\nobb axes:';
@@ -386,7 +404,7 @@ if (!url) {
         bindCheckbox(cbAABB, document.getElementById('lbl-aabb'), false);
       }
 
-      fitCamera(model);
+      fitCamera(model, overlayBox);
       hudText.textContent = url + '\n' + overlays;
     },
     undefined,
