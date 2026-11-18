@@ -159,4 +159,4 @@ int main()
 }
 ```
 
-`minsphere()` takes a list of points like above, or a `Hull3` from `convex_hull()`: the sphere is the same. The returned sphere contains all the points, and its radius is the smallest possible to the precision of floats. `support` lists the two to four points that the sphere passes through and that define it.
+`minsphere()` takes either a list of points, or a `Hull3` returned by `convex_hull()`. The `support` member of the returned Sphere object specifies the 2-4 points that define the generated sphere.
