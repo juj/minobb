@@ -1,6 +1,6 @@
 // test/test_minobb.cpp
 //
-// Usage: test_minobb <file.glb | file.gltf | file.txt> [--ground-truth [threads]]
+// Usage: test_minobb <file.glb | file.gltf | file.txt> [--tolerance fraction | --ground-truth [threads]]
 //
 // Computes the convex hull and the minimum volume OBB of the vertex positions
 // of a glTF file (or of the points in a text file with one "x y z" per line),
@@ -9,6 +9,8 @@
 //     outside of it,
 //   - the extents of the tightest box of the same orientation (measured in
 //     double precision).
+// minobb() is run with the given tolerance (0 for the minimum volume box), or
+// with its default tolerance if none is given.
 //
 // With --ground-truth, the true minimum volume box is searched for and printed
 // instead ("gt"), and minobb() is not run. That is an exhaustive search in
@@ -534,7 +536,7 @@ int main(int argc, char **argv)
 	if (!groundTruth)
 	{
 		const double t2 = seconds();
-		const OBB obb = minobb(hull);
+		const OBB obb = argc > 3 && !strcmp(argv[2], "--tolerance") ? minobb(hull, (float)atof(argv[3])) : minobb(hull);
 		timeMinobb = seconds() - t2;
 
 		// Examine the box of minobb().

@@ -7,7 +7,8 @@ Each <name>.glb produces:
   <name>.json     - the JSON document (hull, obb, aabb_vertices, aabb_hull, timing)
   <name>.json.err - the tool's stderr info lines
 
-The hull/OBB are computed over ALL world-space points (no subsampling).
+The hull/OBB are computed over ALL world-space points (no subsampling). The
+OBB is that of minobb() with its default tolerance, see minobb.h.
 
 Usage (from the repo root):
   python calculate_obb.py [--timeout SECONDS] [--jobs N]

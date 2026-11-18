@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-test_minobb.py - checks that minobb() returns the minimum volume OBB.
+test_minobb.py - checks that minobb() returns the minimum volume OBB, and with
+its default tolerance a box that is at most that much larger.
 
 Builds test/test_minobb.cpp into tmp/, and runs it in parallel on
   - each .glb/.gltf file under the GLB directory,
@@ -10,9 +11,10 @@ Builds test/test_minobb.cpp into tmp/, and runs it in parallel on
     points, and ellipsoids.
 The tool computes the box with minobb(), and the true minimum volume box with
 an exhaustive search in double precision that is independent of minobb.cpp
-(see the header of test/test_minobb.cpp).
+(see the header of test/test_minobb.cpp). minobb() is run twice: with a
+tolerance of 0, and with its default tolerance.
 
-PASS if the box of minobb()
+PASS if the box of minobb() with a tolerance of 0
   - has orthonormal axes and contains all the input points, and
   - is at most 0.01 % larger in volume than the ground truth box, after each
     extent of the latter has been granted an absolute error of 2e-6 times the
@@ -20,6 +22,9 @@ PASS if the box of minobb()
     cannot orient a box more accurately than that. (This only matters for thin
     boxes. If the ground truth box is flat within that error, its volume says
     nothing, and the areas of the largest faces are compared instead.)
+and if the box of minobb() with its default tolerance passes the same checks,
+with the tolerance (DEFAULT_TOLERANCE below, to be kept the same as in minobb.h)
+added to the 0.01 %.
 
 The ground truth of a hull of tens of thousands of vertices takes minutes to
 compute, so for the GLB files it is cached next to the file as <name>.gt.json.
@@ -55,6 +60,7 @@ SOURCES = ["minobb.cpp", "convex_hull.cpp", "glb.cpp", os.path.join("test", "tes
 GROUND_TRUTH_SOURCES = ["convex_hull.cpp", "glb.cpp", os.path.join("test", "test_minobb.cpp")]
 
 TOLERANCE = 1e-4  # of the volume
+DEFAULT_TOLERANCE = 0.0015  # of the volume: the default tolerance of minobb(), see minobb.h
 SLACK = 2e-6      # of the size of the box, on each of its extents
 TIMEOUT = 3600.0  # seconds per run of the tool
 LARGE_HULL = 250000  # hull edges from which the ground truth is searched for on all the workers' threads
@@ -144,10 +150,12 @@ def find_cases(glb_dir, text):
     return [c for c in cases if text in c["name"]]
 
 
-def judge(result):
+def judge(result, tolerance=0.0):
     """Returns the reason why the box of minobb() fails, or None if it passes; how much larger the box is than
     the ground truth box, as a fraction (of the volume; of the area of a flat box; of the length of a box that
-    is a line); and "thin", "flat" or "line" if the precision of floats mattered."""
+    is a line); and "thin", "flat" or "line" if the precision of floats mattered.
+    `tolerance` is the one that minobb() was run with."""
+    allowed = (1 + TOLERANCE) * (1 + tolerance)
     if result["orthonormality_error"] > 1e-5:
         return "the axes are not orthonormal (error %.1e)" % result["orthonormality_error"], 0.0, ""
     if result["outside"] > 1e-6 * result["diagonal"]:
@@ -157,11 +165,11 @@ def judge(result):
     volume = lambda e: (e[0] + pad) * (e[1] + pad) * (e[2] + pad)
     r = min(references, key=volume)
     m = result["minobb"]["extents"]
-    failed = m[0] * m[1] * m[2] > (1 + TOLERANCE) * volume(r)
+    failed = m[0] * m[1] * m[2] > allowed * volume(r)
     if r[0] <= pad / 2:  # A flat reference box: its volume says nothing, compare the areas as well.
-        failed = failed or m[1] * m[2] > (1 + TOLERANCE) * (r[1] + pad) * (r[2] + pad)
+        failed = failed or m[1] * m[2] > allowed * (r[1] + pad) * (r[2] + pad)
     if r[1] <= pad / 2:  # Not even an area: compare the lengths as well.
-        failed = failed or m[2] > (1 + TOLERANCE) * (r[2] + pad)
+        failed = failed or m[2] > allowed * (r[2] + pad)
         excess = m[2] / r[2] - 1 if r[2] > 0 else 0.0
         kind = "line"
     elif r[0] <= pad / 2:
@@ -169,7 +177,10 @@ def judge(result):
         kind = "flat"
     else:
         excess = m[0] * m[1] * m[2] / (r[0] * r[1] * r[2]) - 1
-        kind = "thin" if excess > TOLERANCE else ""
+        kind = "thin" if excess > allowed - 1 else ""
+    if failed and tolerance:
+        return "the box [%.6g %.6g %.6g] is more than %g %% larger than the optimal [%.6g %.6g %.6g]" % (
+            tuple(m) + (tolerance * 100,) + tuple(r)), excess, kind
     if failed:
         return "the box [%.6g %.6g %.6g] is not optimal: [%.6g %.6g %.6g] is" % (tuple(m) + tuple(r)), excess, kind
     return None, excess, kind
@@ -187,8 +198,9 @@ def run_tool(case, *args):
 
 
 def run_case(case, stamp, refresh, jobs):
-    """Computes the box of minobb() for one case, and its ground truth unless that is in the cache."""
-    result = run_tool(case)
+    """Computes the boxes of minobb() for one case, with no tolerance and with the default one, and its ground
+    truth unless that is in the cache."""
+    result = run_tool(case, "--tolerance", "0")
     if "error" in result:
         return dict(case, failure=result["error"], seconds={})
     hull = result["hull"]
@@ -201,7 +213,8 @@ def run_case(case, stamp, refresh, jobs):
         if cached.get("stamp") != [stamp, os.path.getmtime(case["path"])]:
             cached = None
     if cached:
-        result.update(cached["boxes"])
+        boxes = cached["boxes"]
+        result.update(boxes)
     else:
         truth = run_tool(case, "--ground-truth", str(jobs if hull["edges"] >= LARGE_HULL else 1))
         if "error" in truth:
@@ -213,8 +226,19 @@ def run_case(case, stamp, refresh, jobs):
             with open(case["cache"], "w", encoding="utf-8") as f:
                 json.dump({"stamp": [stamp, os.path.getmtime(case["path"])], "boxes": boxes}, f)
     failure, excess, kind = judge(result)
+    # The same with the default tolerance of minobb().
+    loose = run_tool(case)
+    if "error" in loose or not loose["valid"]:
+        loose_failure, loose_excess, loose_kind, loose_seconds = loose.get("error", "minobb() did not return a box"), 0.0, "", 0.0
+    else:
+        loose.update(boxes)
+        loose_failure, loose_excess, loose_kind = judge(loose, DEFAULT_TOLERANCE)
+        loose_seconds = loose["seconds"]["minobb"]
+    if loose_failure and not failure:
+        failure = "with the default tolerance: " + loose_failure
     return dict(case, failure=failure, excess=excess, kind=kind, seconds=result["seconds"], hull=hull,
-                volume=result["minobb"]["volume"], computed=not cached)
+                volume=result["minobb"]["volume"], computed=not cached, loose_excess=loose_excess, loose_kind=loose_kind,
+                loose_seconds=loose_seconds)
 
 
 def main():
@@ -244,7 +268,8 @@ def main():
                 + {"": "{:+.1e} % vs. the optimum", "flat": "flat: area {:+.1e} % vs. the optimum",
                    "line": "a line: length {:+.1e} % vs. the optimum",
                    "thin": "thin: {:+.1e} % vs. the optimum is within the precision of floats"}[r["kind"]].format(r["excess"] * 100)
-                + f"  ({r['seconds']['minobb'] * 1000:.1f} ms)")
+                + f"  ({r['seconds']['minobb'] * 1000:.1f} ms)"
+                + f"; with the default tolerance {r['loose_excess'] * 100:+.1e} %  ({r['loose_seconds'] * 1000:.1f} ms)")
             print(f"  {'FAIL' if r['failure'] else 'PASS'}  {r['name']}  {detail}", flush=True)
 
     failed = [r for r in results if r["failure"]]
@@ -259,6 +284,12 @@ def main():
               f" {count('thin')} thin boxes are within the precision of floats (volume up to {worst('thin'):.1e} %)")
         print(f"minobb() took {sum(r['seconds']['minobb'] for r in done):.1f} s in total,"
               f" at most {max(r['seconds']['minobb'] for r in done):.1f} s")
+        plain = [r['loose_excess'] for r in done if r['loose_kind'] == '' and not r['failure']] or [0.0]
+        print(f"with the default tolerance of {DEFAULT_TOLERANCE * 100:g} %: largest excess over the optimum among the passed:"
+              f" volume {max(plain) * 100:.1e} %, on average {sum(plain) / len(plain) * 100:.1e} %"
+              f" (not counting the {sum(r['loose_kind'] != '' for r in done)} flat, thin and line boxes);"
+              f" minobb() took {sum(r['loose_seconds'] for r in done):.1f} s in total,"
+              f" at most {max(r['loose_seconds'] for r in done):.1f} s")
         print(f"ground truth: {sum(r['computed'] for r in done)} computed"
               f" (in {sum(r['seconds']['ground_truth'] + r['seconds']['sweep'] for r in done):.0f} s),"
               f" {sum(not r['computed'] for r in done)} from the cache; wall time {time.time() - t0:.0f} s")

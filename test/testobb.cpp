@@ -20,7 +20,9 @@
 // For each example the test checks:
 //  1. All input points are enclosed by the returned OBB.
 //  2. The OBB axes form an orthonormal right-handed basis.
-//  3. The volume matches the reference minimum within 1e-4 relative error.
+//  3. The volume matches the reference minimum within 1e-4 relative error, with
+//     a tolerance of 0. With the default tolerance of minobb() the box is at
+//     most that much larger than the minimum.
 //  4. The contact structure described in the paper holds (see contactsA-D below).
 //
 // Also verifies that the stride_bytes argument works by feeding one example with
@@ -157,7 +159,7 @@ static void runExample(const char *name, const float *refPts, int n, float refVo
 	for (int i = 0; i < n; ++i)
 		pts[i] = vec3(refPts[3*i], refPts[3*i+1], refPts[3*i+2]);
 
-	OBB o = minobb(convex_hull((float *)refPts, n, 12));
+	OBB o = minobb(convex_hull((float *)refPts, n, 12), 0.f);
 	printf("%s: volume = %.9g (ref %.9g)\n", name, o.Volume(), refVolume);
 	printf("    pos = (%.6f, %.6f, %.6f), r = (%.6f, %.6f, %.6f)\n",
 		o.pos[0], o.pos[1], o.pos[2], o.r[0], o.r[1], o.r[2]);
@@ -170,6 +172,15 @@ static void runExample(const char *name, const float *refPts, int n, float refVo
 	CHECK(fabsf(o.Volume() - refVolume) <= refVolume * 1e-4f,
 		"%s: volume %.9g differs from reference %.9g", name, o.Volume(), refVolume);
 	checkContacts(name, o, pts, n);
+
+	// With the default tolerance: a box that is at most 0.15 % larger than the minimum.
+	OBB loose = minobb(convex_hull((float *)refPts, n, 12));
+	printf("    with the default tolerance: volume = %.9g\n", loose.Volume());
+	CHECK(!loose.IsDegenerate(), "%s: OBB with the default tolerance is degenerate", name);
+	CHECK(encloses(loose, pts, n), "%s: OBB with the default tolerance does not enclose all input points", name);
+	CHECK(isOrthonormal(loose), "%s: axes of the OBB with the default tolerance are not orthonormal", name);
+	CHECK(loose.Volume() >= refVolume * (1.f - 1e-4f) && loose.Volume() <= refVolume * (1.f + 0.0015f + 1e-4f),
+		"%s: volume %.9g with the default tolerance is not within 0.15 %% above the reference %.9g", name, loose.Volume(), refVolume);
 	printf("\n");
 }
 
@@ -332,7 +343,7 @@ int main()
 				padded[i].padding[k] = 999.f; // Junk data that must be ignored.
 		}
 		CHECK(sizeof(PaddedPoint) == 20, "test setup: expected 20 byte padded struct");
-		OBB o = minobb(convex_hull((float *)&padded[0], 4, (int)sizeof(PaddedPoint)));
+		OBB o = minobb(convex_hull((float *)&padded[0], 4, (int)sizeof(PaddedPoint)), 0.f);
 		vec3 pts[4] = { vec3(0,0,0), vec3(5,2,2), vec3(5,5,0), vec3(10,0,0) };
 		printf("stride(20): volume = %.9g (ref 100)\n", o.Volume());
 		CHECK(!o.IsDegenerate(), "stride: OBB is degenerate");
@@ -349,7 +360,7 @@ int main()
 			5.f, 5.f, 0.f,
 			0.f, 5.f, 0.f,
 			2.f, 3.f, 0.f };
-		OBB o = minobb(convex_hull((float *)pts, 5, 12));
+		OBB o = minobb(convex_hull((float *)pts, 5, 12), 0.f);
 		vec3 p[5] = { vec3(0,0,0), vec3(5,0,0), vec3(5,5,0), vec3(0,5,0), vec3(2,3,0) };
 		printf("planar: volume = %.9g\n", o.Volume());
 		CHECK(!o.IsDegenerate(), "planar: OBB is degenerate");
@@ -371,7 +382,7 @@ int main()
 			0.9f, 1.1f, delta,
 			1.3f, -0.2f, -2.f };
 		vec3 p[5] = { vec3(0,0,0), vec3(2,0,0), vec3(0,2,0), vec3(0.9f,1.1f,delta), vec3(1.3f,-0.2f,-2.f) };
-		OBB o = minobb(convex_hull((float *)pts, 5, 12));
+		OBB o = minobb(convex_hull((float *)pts, 5, 12), 0.f);
 		printf("near-planar: volume = %.6f\n", o.Volume());
 		CHECK(!o.IsDegenerate(), "near-planar: OBB is degenerate");
 		CHECK(encloses(o, p, 5), "near-planar: OBB does not enclose all points");

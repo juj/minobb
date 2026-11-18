@@ -1125,9 +1125,12 @@ static void FarVerticesAlong(const std::vector<vec3> &vtx, const std::vector<std
 }
 
 // What MeasureBox() needs for measuring a box with only the vertices of the hull that decide its size, and
-// its count of whether that pays off on the hull at hand: see MeasureBox().
+// its count of whether that pays off on the hull at hand: see MeasureBox(). Also the tolerance of the search.
 struct BoxProbe
 {
+	// What share of the volume of the best box a box has to be below to take its place: 1 / (1 + tolerance),
+	// see minVolume in OptimalEnclosingOBB3D().
+	const float volumeShareToBeat;
 	const std::vector<std::vector<int> > &adjacencyData;
 	// The marks of its searches. (Not those of the caller, who can have a graph search of its own under way.)
 	std::vector<unsigned long long> visited;
@@ -1142,16 +1145,17 @@ struct BoxProbe
 	long long balance;
 	std::vector<vec3> points;
 
-	BoxProbe(const std::vector<std::vector<int> > &adjacencyData_, size_t numVertices)
-		: adjacencyData(adjacencyData_), visited(numVertices), visitColor(0), numUses(0), balance(0)
+	BoxProbe(float volumeShareToBeat_, const std::vector<std::vector<int> > &adjacencyData_, size_t numVertices)
+		: volumeShareToBeat(volumeShareToBeat_), adjacencyData(adjacencyData_), visited(numVertices), visitColor(0), numUses(0), balance(0)
 	{
 		for (int i = 0; i < numSearches; ++i)
 			lastUse[i] = 0;
 	}
 };
 
-// Measures the box with the axes n1 and n2 (and their cross product), and makes it the best box if it is
-// smaller than the best box so far.
+// Measures the box with the axes n1 and n2 (and their cross product), and makes it the best box if its volume
+// is below *minVolume: below the volume of the best box so far, less the tolerance of the search. *minVolume
+// is then set for the next box to beat. See minVolume in OptimalEnclosingOBB3D().
 // (hullV are the vertices of the hull as OptimalEnclosingOBB3D() gets them: at most 28 from the origin.)
 // (Not to be inlined: this is called for few of the boxes that TestBox() is, and as a part of the code of its
 // callers it slows the search of a small hull down by a percent or two.)
@@ -1254,14 +1258,15 @@ static void MeasureBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec
 	if (obb.Volume() < *minVolume)
 	{
 		*minOBB = obb;
-		*minVolume = obb.Volume();
+		*minVolume = obb.Volume() * probe.volumeShareToBeat;
 	}
 }
 
 // Makes the box with the axes n1 and n2 (and their cross product) the best box, if it is smaller than
-// the best box so far. `volume` is the volume that the search derived for it from the vertices it assumed
-// the box to be in contact with: that can only be smaller than the volume of the actual tightest box of
-// that orientation, which therefore is measured only if `volume` is below the best volume so far.
+// the best box so far, by more than the tolerance of the search: if its volume is below *minVolume. `volume`
+// is the volume that the search derived for the box from the vertices it assumed the box to be in contact
+// with: that can only be smaller than the volume of the actual tightest box of that orientation, which
+// therefore is measured only if `volume` is below *minVolume.
 static inline void TestBox(const std::vector<vec3> &hullV, const vec3 &n1, const vec3 &n2, float volume,
 	float *minVolume, OBB *minOBB, BoxProbe &probe)
 {
@@ -1484,7 +1489,9 @@ static unsigned long long SectorsOfPerpendicularNormals(const vec3 &fa, const ve
 // Port of OBB::OptimalEnclosingOBB(const Polyhedron &).
 // Returns an OBB with IsDegenerate() == true if the input is (near) planar.
 // `faceNormals` are the unit normals of the faces of the hull.
-static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &faceNormals)
+// Searches for the smallest box around the hull. `volumeShareToBeat` is 1 / (1 + tolerance): the box that is
+// returned has at most 1 + tolerance times the volume of the smallest box (1 for the smallest box itself).
+static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &faceNormals, float volumeShareToBeat)
 {
 	double t0 = TRACE_START();
 	long evcCalls0 = 0, evcSteps0 = 0;
@@ -1508,10 +1515,21 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	     third edges are found by a graph search along the boxes that are flush with the two.
 	  9. Return the best found OBB.
 	  The sidepodal edges of an edge are computed when steps 6-8 first need them. O(S) per edge.
+	  With a tolerance, a box only replaces the best box if it is smaller by more than the tolerance, and the
+	  steps above skip whatever cannot be that much smaller: see minVolume.
 	*/
 
 	OBB minOBB;
 	minOBB.r = vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX); // Degenerate marker.
+	// The volume that a box has to be below to become the best box: the volume of the best box so far times
+	// volumeShareToBeat, i.e. divided by 1 + tolerance. Everything that the search rules out is a box, or a set
+	// of boxes, that is shown to be no smaller than this at the time. This only goes down, so at the end the
+	// smallest box of all is no smaller than this either: the best box has at most 1 + tolerance times its
+	// volume. Without a tolerance this is the volume of the best box, which then is the smallest box.
+	// (Where the comments below say that something is no smaller than the best box, or cannot be smaller,
+	// they mean no smaller than this.)
+	// On a hull that has many boxes nearly as small as the smallest one, as a finely tessellated ball does, a
+	// tolerance takes the search from minutes to seconds: without it, next to nothing can be ruled out there.
 	float minVolume = FLT_MAX;
 
 	// Handle degenerate planar cases up front.
@@ -1613,8 +1631,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 #define HAVE_VISITED_VERTEX(v) (floodFillVisited[(v)] == floodFillVisitColor) // HAVE_VISITED_VERTEX(v) implies HAVE_QUEUED_VERTEX(v)
 #define CLEAR_GRAPH_SEARCH() (++floodFillVisitColor)
 
-	// For TestBox(): the searches that it measures a box with.
-	BoxProbe boxProbe(adjacencyData, hull.v.size());
+	// For TestBox(): the searches that it measures a box with, and the tolerance.
+	BoxProbe boxProbe(volumeShareToBeat, adjacencyData, hull.v.size());
 
 	// Stores for each edge index i the complete list of antipodal vertices for that edge.
 	std::vector<std::vector<int> > antipodalPointsForEdge(E);
@@ -2786,7 +2804,7 @@ static OBB SmallestOBBAlongAxis(const std::vector<vec3> &pointArray, const vec3 
 	return FixedOrientationEnclosingOBB(pointArray, axis, u * uDir.x + v * uDir.y);
 }
 
-OBB minobb(const Hull3 &hull)
+OBB minobb(const Hull3 &hull, float tolerance)
 {
 	OBB degenerate;
 	degenerate.pos = vec3(0.f, 0.f, 0.f);
@@ -2865,7 +2883,8 @@ OBB minobb(const Hull3 &hull)
 			faceNormals[i] = PolyhedronFaceNormal(hull, (int)i);
 
 		double t0 = TRACE_START();
-		obb = OptimalEnclosingOBB3D(local, faceNormals);
+		// (A negative tolerance, or a NaN, counts as none.)
+		obb = OptimalEnclosingOBB3D(local, faceNormals, tolerance > 0.f ? (float)(1.0 / (1.0 + tolerance)) : 1.f);
 		TRACE_MARK(t0, "minobb: OptimalEnclosingOBB3D");
 		if (obb.IsDegenerate())
 		{

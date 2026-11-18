@@ -15,7 +15,8 @@
 //
 // Typical usage is a two-pass run:
 //   Hull3 hull = convex_hull(pts, num_pts, stride_bytes); // See convex_hull.h.
-//   OBB obb = minobb(hull);
+//   OBB obb = minobb(hull);      // At most 0.15 % larger than the minimum-volume box.
+//   OBB obb = minobb(hull, 0.f); // The minimum-volume box itself.
 //
 // minobb() enumerates the candidate box orientations implied by the contact
 // configurations above (the paper's Theorem 7.1: the minimum-volume OBB touches
@@ -29,6 +30,9 @@
 // convex hull edges). The configurations that cannot make a smaller box than
 // the best one found so far are skipped, which on most hulls is nearly all of
 // them. The input can be large, as long as its hull is small to medium sized.
+// The exceptions are the hulls that have many boxes nearly as small as the
+// smallest one, such as a finely tessellated ball: there next to nothing can
+// be skipped, unless a tolerance is given (see minobb() below).
 //
 // Degenerate input (all points in a plane, on a line, or a single point) is
 // handled by a 2D rotating-calipers / 1D fallback, producing a flat OBB.
@@ -65,7 +69,20 @@ struct OBB
 
 // Computes the minimum-volume OBB (conjectured, see Theorem 7.1 of the paper)
 // enclosing the given convex hull (and hence the point set the hull was
-// computed from).
+// computed from), to within the given tolerance.
+//
+// `tolerance` is how much larger than the minimum-volume box the returned box
+// may be, as a fraction of the volume: the volume of the returned box is at
+// most 1 + tolerance times the minimum (with the default of 0.0015, at most
+// 0.15 % larger). With a tolerance of 0 the returned box is the minimum-volume
+// box itself.
+// With a tolerance the search skips all the configurations that cannot make
+// the box smaller by more than the tolerance. On the hulls that have many
+// boxes nearly as small as the smallest one, that is the difference between
+// minutes and seconds: a ball of 126,850 hull vertices takes 7 minutes with a
+// tolerance of 0, and 2 seconds with one of 0.0015. Most boxes come out much
+// closer to the minimum than the tolerance allows.
+// (The tolerance has no effect on a flat hull: its box is the smallest one.)
 //
 // `hull` must be the result of convex_hull() for the point set of interest.
 // For degenerate (planar/collinear/single-point) hulls a flat OBB is returned
@@ -81,4 +98,4 @@ struct OBB
 //
 // Returns a degenerate OBB (IsDegenerate() == true) if the hull has no
 // vertices.
-OBB minobb(const Hull3 &hull);
+OBB minobb(const Hull3 &hull, float tolerance = 0.0015f);

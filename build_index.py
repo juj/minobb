@@ -197,7 +197,7 @@ PAGE = r"""<!DOCTYPE html>
     <div></div>
   </figure>
   <figure id="chart-obb">
-    <figcaption><b>Minimum OBB time</b><span>minobb() on one thread, by the number of hull vertices. One point per file (@OBB_COUNT@).</span></figcaption>
+    <figcaption><b>Minimum OBB time</b><span>minobb() with its default tolerance, on one thread, by the number of hull vertices. One point per file (@OBB_COUNT@).</span></figcaption>
     @LEGEND@
     <div class="plot"><canvas role="img" aria-label="Scatter plot of the minimum OBB computation time against the number of vertices of the convex hull, one point per file. The table below has the same numbers."></canvas><div class="tip"></div></div>
     @NOTE@

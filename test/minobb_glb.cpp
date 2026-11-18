@@ -5,7 +5,8 @@
 // Opens the GLB file given in argv[1], collects the POSITION vertices of
 // every primitive in the scene, transforms them into scene (world) space
 // using the glTF node graph, computes the convex hull and the minimum-volume
-// OBB with minobb(), and prints both as a JSON document to stdout.
+// OBB with minobb() (with its default tolerance: the box can be that much
+// larger than the minimum), and prints both as a JSON document to stdout.
 //
 // max_points (optional, 0 = no cap): the input may be reduced to at most
 // max_points with a deterministic uniform world-space grid (one point per

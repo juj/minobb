@@ -36,7 +36,7 @@ int main(int argc, char **argv)
 		}
 		GT_ResetWinRec();
 		double gt = gt_volume(&v[0], n);
-		OBB mine = minobb(convex_hull(&v[0], n, 12));
+		OBB mine = minobb(convex_hull(&v[0], n, 12), 0.f); // (No tolerance: the minimum-volume box.)
 		double my = mine.Volume();
 		double rel = (gt > 0 && my > 0) ? fabs(gt - my) / fmax(gt, my) : 0.0;
 		if (rel > 1e-4)

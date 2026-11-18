@@ -46,7 +46,7 @@ int main()
 		0.9f,  1.1f,  delta,
 		1.3f, -0.2f, -2.f,
 	};
-	OBB o = minobb(convex_hull(v, 5, 12));
+	OBB o = minobb(convex_hull(v, 5, 12), 0.f); // (No tolerance: the minimum-volume box.)
 	printf("volume = %.6f\n", o.Volume());
 	printf("r = (%.6f, %.6f, %.6f)\n", o.r.x, o.r.y, o.r.z);
 
