@@ -393,12 +393,24 @@ static std::vector<std::vector<int> > GenerateVertexAdjacencyData(const Hull3 &h
 // Returns the unit normal of a face of the hull. Computed in double precision as the sum of the cross
 // products of a triangle fan of the face (i.e. Newell's method, relative to the first vertex), so that
 // also small and thin faces get an accurate normal.
+// The cross product of each triangle is that of its two shortest sides. A hull can have vertices that are
+// only some 1e-17 apart (where a ring of vertices of a mesh has collapsed into a point, say), and a
+// triangle with such a side is a sliver: its two long sides are parallel to the precision of doubles, so
+// their cross product is noise, or zero. The short side is accurate, as the difference of two vertices
+// that are next to each other, and it is not parallel to the long ones.
 static vec3 PolyhedronFaceNormal(const Hull3 &poly, int faceIndex)
 {
 	const std::vector<int> &face = poly.f[faceIndex];
 	dvec3 normal;
+	const dvec3 a = poly.v[face[0]];
 	for(size_t i = 1; i + 1 < face.size(); ++i)
-		normal = normal + cross(dvec3(poly.v[face[i]]) - dvec3(poly.v[face[0]]), dvec3(poly.v[face[i+1]]) - dvec3(poly.v[face[0]]));
+	{
+		const dvec3 b = poly.v[face[i]], c = poly.v[face[i+1]];
+		const dvec3 ab = b - a, bc = c - b, ca = a - c;
+		const double abSq = dot(ab, ab), bcSq = dot(bc, bc), caSq = dot(ca, ca);
+		// (Any two sides, taken in the order of the triangle, give the same product.)
+		normal = normal + (abSq >= bcSq && abSq >= caSq ? cross(bc, ca) : (bcSq >= caSq ? cross(ca, ab) : cross(ab, bc)));
+	}
 	return Normalized(normal).ToFloat();
 }
 
