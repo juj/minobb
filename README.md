@@ -96,6 +96,8 @@ lake env lean Verify.lean   # prints the statements of the main theorems and the
 
 The algorithm has been tested on 6,933 glTF models from the [Objaverse](https://objaverse.allenai.org/) data set, of up to 15 million vertices each, with convex hulls of up to 323,658 vertices. For every model, the box of `minobb()` is compared with the result of an exhaustive search in double precision: with `tolerance=0` the results have been confirmed to be equal.
 
+![Plot of object vertex counts vs computation runtime](plots.png)
+
 [The test results](https://juj.github.io/minobb/site/results.html) show the computation times of the convex hull and of the OBB for each model in the test set. With the default tolerance, the OBB of a typical model takes half a millisecond for a hull of under 100 vertices, 3 milliseconds for one of hundreds of vertices, and 20 milliseconds for one of thousands, on one thread of a desktop CPU. The slowest model of the data set takes 5 seconds.
 
 ## Running tests

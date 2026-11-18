@@ -7,8 +7,7 @@ The table can be sorted by any of its columns, by clicking the column header.
 One of them is the volume of the OBB as a fraction of that of the axis-aligned
 box, which finds the models that the OBB fits much better. The table also has
 the time of the minimum enclosing sphere (minsphere() on the input vertices),
-and the volume of the sphere as a multiple of that of the OBB. Each plot also
-has the curve c n^p (ln n)^q that fits its times the best, see fit_curves().
+and the volume of the sphere as a multiple of that of the OBB.
 
 Also writes site/results.html: the same page without the links, for
 publishing. (The models themselves are not part of the repository, so on a
@@ -81,52 +80,6 @@ def format_ratio(ratio: float) -> str:
     return f"{ratio:.2f}x" if ratio < 10000 else f"{ratio:.1e}x"
 
 
-# The curves that are fitted to the times: c n^p (ln n)^q, for these exponents p and q.
-FIT_POWERS = (1.0, 1.5, 2.0, 3.0)
-FIT_LOG_POWERS = (0, 1, 2, 3)
-# The points with fewer vertices than this are left out of the fits. (ln n has to be positive, and the times
-# of the smallest inputs are those of the fixed work of a call rather than of their size.)
-FIT_MIN_N = 8
-
-
-def fit_curves(points):
-    """Fits t = c n^p (ln n)^q to the given (n, t) pairs, for each p and q above: by least squares on ln t,
-    which makes c the geometric mean of t / (n^p (ln n)^q). Returns the fits, the best one first, as dicts of
-    p, q, c and `factor`: e to the root mean square error of ln t. (A factor of 2 means that the times are
-    typically within a factor of 2 of the curve, above or below.) Also returns the number of points used."""
-    points = [(n, t) for n, t in points if n >= FIT_MIN_N and t > 0]
-    fits = []
-    for power in FIT_POWERS:
-        for log_power in FIT_LOG_POWERS:
-            if not points:
-                break
-            residuals = [math.log(t) - power * math.log(n) - log_power * math.log(math.log(n)) for n, t in points]
-            mean = sum(residuals) / len(residuals)
-            rms = math.sqrt(sum((r - mean) ** 2 for r in residuals) / len(residuals))
-            fits.append({"p": power, "q": log_power, "c": math.exp(mean), "factor": math.exp(rms)})
-    fits.sort(key=lambda f: f["factor"])
-    return fits, len(points)
-
-
-def curve_html(fit) -> str:
-    """The curve of a fit as HTML, without its constant: n, n^3/2 ln^2 n, ..."""
-    power = {1.0: "", 1.5: "<sup>3/2</sup>", 2.0: "<sup>2</sup>", 3.0: "<sup>3</sup>"}[fit["p"]]
-    log = "" if fit["q"] == 0 else " ln n" if fit["q"] == 1 else f' ln<sup>{fit["q"]}</sup> n'
-    return f"n{power}{log}"
-
-
-def fit_note(fits, count: int, what: str) -> str:
-    """The text under a plot that tells its best fit and the runners-up."""
-    if not fits:
-        return "<div></div>"
-    best = fits[0]
-    others = ", ".join(f'{curve_html(f)} (×{f["factor"]:.2f})' for f in fits[1:4])
-    return (f'<p class="note fit">Best fit: <b>t ≈ {format_time(best["c"])} × {curve_html(best)}</b>, with the times typically'
-            f' within a factor of {best["factor"]:.2f} of it. The next best: {others}.'
-            f' <span class="dim">Fitted to the {count:,} {what}, among c n<sup>p</sup> ln<sup>q</sup> n'
-            f' for p of 1, 3/2, 2 and 3 and q of 0 to 3, by least squares on the logarithm of the time.</span></p>')
-
-
 def main() -> None:
     files = []
     for dirpath, _dirnames, filenames in os.walk(GLB_DIR):
@@ -180,10 +133,6 @@ def write_page(files, out_file: str, links: bool) -> None:
 
     if not table:
         table.append('    <tr><td class="dim" colspan="9">no .glb files found under ' + html.escape(GLB_DIR) + '</td></tr>')
-    # The curves: the hull times by the number of input vertices; and the OBB times by the number of hull
-    # vertices, of the solid hulls (a flat hull gets its box by another, two-dimensional method).
-    hull_fits, hull_count = fit_curves([(row[2], row[4]) for row in data])
-    obb_fits, obb_count = fit_curves([(row[3], row[5]) for row in data if row[5] is not None and not row[6]])
     # (Each figure has the same four parts, empty or not.)
     legend = ('<div class="legend">'
               '<span><svg width="12" height="12"><circle cx="6" cy="6" r="4" style="fill: var(--series-1)"/></svg>'
@@ -191,17 +140,11 @@ def write_page(files, out_file: str, links: bool) -> None:
     if any(row[6] for row in data):
         legend += ('<span><svg width="12" height="12"><path d="M6 1 11 6 6 11 1 6Z" style="fill: var(--series-2)"/></svg>'
                    'flat hull (planar or collinear input)</span>')
-    if hull_fits or obb_fits:
-        legend += ('<span><svg width="18" height="12"><path d="M1 10 17 2" style="stroke: var(--ink); stroke-width: 2"/></svg>'
-                   'best fit</span>')
     legend += '</div>'
     note = "<div></div>"
     if no_box:
         note = (f'<p class="note">Not shown: {len(no_box)} file{"s" if len(no_box) > 1 else ""} for which minobb()'
                 f' returned no box: {", ".join(no_box)}.</p>')
-    hull_note = fit_note(hull_fits, hull_count, f"files of at least {FIT_MIN_N} input vertices")
-    obb_note = fit_note(obb_fits, obb_count, f"solid hulls of at least {FIT_MIN_N} vertices")
-    note = obb_note if not no_box else f"<div>{obb_note}{note}</div>"
 
     values = {
         "COUNT": str(len(files)),
@@ -209,8 +152,6 @@ def write_page(files, out_file: str, links: bool) -> None:
         "OBB_COUNT": str(len(data) - len(no_box)),
         "LEGEND": legend,
         "NOTE": note,
-        "HULL_NOTE": hull_note,
-        "FITS": json.dumps({"hull": hull_fits[:1], "obb": obb_fits[:1]}, separators=(",", ":")),
         "ROWS": "\n".join(table),
         "CLICK_HINT": " Click a point to open the file in the viewer." if links else "",
         # (No "<" in the data, so that nothing in it can end the script element.)
@@ -256,8 +197,6 @@ PAGE = r"""<!DOCTYPE html>
   .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
   .legend svg { vertical-align: -1px; margin-right: 6px; }
   .note { margin: 4px 0 6px; }
-  .note b { color: var(--ink); }
-  .note sup { font-size: 9px; line-height: 0; }
   .plot { position: relative; height: 420px; margin-top: 6px; }
   .plot canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .tip { position: absolute; left: 0; top: 0; display: none; pointer-events: none; white-space: nowrap; z-index: 1;
@@ -299,7 +238,7 @@ PAGE = r"""<!DOCTYPE html>
     <figcaption><b>Convex hull time</b><span>convex_hull() on one thread, by the number of input vertices. One point per file (@HULL_COUNT@).</span></figcaption>
     @LEGEND@
     <div class="plot"><canvas role="img" aria-label="Scatter plot of the convex hull computation time against the number of input vertices, one point per file. The table below has the same numbers."></canvas><div class="tip"></div></div>
-    @HULL_NOTE@
+    <div></div>
   </figure>
   <figure id="chart-obb">
     <figcaption><b>Minimum OBB time</b><span>minobb() with its default tolerance, on one thread, by the number of hull vertices. One point per file (@OBB_COUNT@).</span></figcaption>
@@ -325,7 +264,6 @@ PAGE = r"""<!DOCTYPE html>
   </tbody>
 </table>
 <script type="application/json" id="glb-data">@DATA@</script>
-<script type="application/json" id="glb-fits">@FITS@</script>
 <script>
 (function () {
   'use strict';
@@ -334,8 +272,6 @@ PAGE = r"""<!DOCTYPE html>
   // sphere seconds, and the volume of the sphere as a multiple of that of the OBB (null: no sphere, or a flat box).
   const rows = JSON.parse(document.getElementById('glb-data').textContent);
   const HREF = 0, NAME = 1, POINTS = 2, HULL = 3, HULL_SEC = 4, OBB_SEC = 5, FLAT = 6, RATIO = 7, SPHERE_SEC = 8, SPHERE_RATIO = 9;
-  // The curves that fit the times of the two plots the best: c n^p (ln n)^q each.
-  const fits = JSON.parse(document.getElementById('glb-fits').textContent);
 
   const css = getComputedStyle(document.documentElement);
   const color = name => css.getPropertyValue(name).trim();
@@ -518,23 +454,6 @@ PAGE = r"""<!DOCTYPE html>
         ctx.fillStyle = SURFACE; path(x, y, rows[i][FLAT], RADIUS + RING); ctx.fill();
         ctx.fillStyle = SERIES[rows[i][FLAT]]; path(x, y, rows[i][FLAT], RADIUS); ctx.fill();
       }
-      // The curve of the best fit, on top of the points, with an outline of the surface color that sets it
-      // apart from them.
-      if (spec.fit) {
-        ctx.beginPath();
-        let started = false;
-        for (let px = L; px <= R; px += 2) {
-          const n = inv(v.x0 + (px - L) / (R - L) * (v.x1 - v.x0));
-          const t = n > 1 ? spec.fit.c * Math.pow(n, spec.fit.p) * Math.pow(Math.log(n), spec.fit.q) : 0;
-          if (!(t > 0)) continue;
-          const y = Math.min(Math.max(sy(fwd(t)), T - 100), B + 100);
-          if (started) ctx.lineTo(px, y); else { ctx.moveTo(px, y); started = true; }
-        }
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = SURFACE; ctx.lineWidth = 5; ctx.stroke();
-        ctx.strokeStyle = INK; ctx.lineWidth = 2; ctx.stroke();
-        ctx.lineWidth = 1;
-      }
       // The row under the pointer: lines to its values on the axes, and a larger, outlined point.
       const p = position(hover);
       if (p) {
@@ -670,8 +589,8 @@ PAGE = r"""<!DOCTYPE html>
     for (const c of charts) { c.draw(); c.showTip(); }
   }
 
-  makeChart('chart-hull', { x: POINTS, y: HULL_SEC, xUnits: COUNT_UNITS, xTitle: 'input vertices', yName: 'convex hull time', fit: fits.hull[0] });
-  makeChart('chart-obb', { x: HULL, y: OBB_SEC, xUnits: COUNT_UNITS, xTitle: 'hull vertices', yName: 'minimum OBB time', fit: fits.obb[0] });
+  makeChart('chart-hull', { x: POINTS, y: HULL_SEC, xUnits: COUNT_UNITS, xTitle: 'input vertices', yName: 'convex hull time' });
+  makeChart('chart-obb', { x: HULL, y: OBB_SEC, xUnits: COUNT_UNITS, xTitle: 'hull vertices', yName: 'minimum OBB time' });
 
   // ---- The controls above the plots, which act on both.
   const scaleButtons = document.querySelectorAll('[data-scale]');
