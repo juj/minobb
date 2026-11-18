@@ -2291,6 +2291,50 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		compatibleEdgesEnd[i] = compatibleEdges.size();
 	};
 
+	// The orientations that were tested the latest, for not testing the same box over and over: a hull that has
+	// a face of many edges derives the box that is aligned with the face from thousands of edge triplets in a
+	// row, with the antipodal vertices of the edges to go through for each. The table has the three axes of an
+	// orientation as they were given, to 2^-28 per coordinate: two orientations that agree to that are the same
+	// box in single precision (its extents differ by a fraction of their last bit). The first test of an
+	// orientation either measures the box or shows that it is no smaller than the best one, which stays true,
+	// as the best volume only goes down: so an orientation that is in the table need not be tested again.
+	// (The axes are kept in their order and with their signs. The box that is measured is that of the first two
+	// axes, made orthogonal, and the axes can be 1e-3 off perpendicular: see ComputeBasis(). The same three
+	// directions in another order are then another box.)
+	// (The table is set up when it is first used, which it is only for the boxes of edges that have many
+	// antipodal vertices: most hulls have none. Its size goes with the number of edges of the hull, from 1024
+	// to 16384 orientations.)
+	struct TestedAxes { int axis[9]; };
+	std::vector<TestedAxes> testedAxes;
+	auto alreadyTested = [&](const vec3 &n1, const vec3 &n2, const vec3 &n3) -> bool
+	{
+		if (testedAxes.empty())
+		{
+			size_t size = 1024;
+			while (size < 4 * spatialEdgeOrder.size() && size < 16384)
+				size *= 2;
+			TestedAxes none;
+			none.axis[0] = 0x7fffffff; // (Not a coordinate of a unit vector: matches nothing.)
+			testedAxes.assign(size, none);
+		}
+		const vec3 *axes[3] = { &n1, &n2, &n3 };
+		TestedAxes key;
+		unsigned int hash = 2166136261u;
+		for (int k = 0; k < 9; ++k)
+		{
+			const float coordinate = (*axes[k / 3])[k % 3];
+			if (!(coordinate >= -2.f && coordinate <= 2.f)) // (Also NaNs: not something to look up.)
+				return false;
+			key.axis[k] = (int)lrint((double)coordinate * 268435456.0);
+			hash = (hash ^ (unsigned int)key.axis[k]) * 16777619u;
+		}
+		TestedAxes &slot = testedAxes[(hash ^ (hash >> 15)) % testedAxes.size()];
+		if (memcmp(&slot, &key, sizeof(key)) == 0)
+			return true;
+		slot = key;
+		return false;
+	};
+
 	// Categories 2 and 3 both fix one axis n1 of the box: the normal of a face of the box that is flush with
 	// two edges of the hull at once. The hull extends from minN1 to maxN1 along it. This tests the boxes that
 	// have that axis, and another face flush with an edge that is sidepodal to edge e1, one of those two edges.
@@ -2355,6 +2399,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			// with the vertices that the searches would start from, there is no need to search.
 			if (maxN1 >= minN1 && maxN3 >= minN3
 				&& (maxN1 - minN1) * (dot(n2, hull.v[extremeVertexSearchHint1]) + dot(-n2, hull.v[extremeVertexSearchHint2])) * (maxN3 - minN3) >= minVolume)
+				continue;
+
+			// (An edge with many antipodal vertices is likely to be one of many that give this same box.)
+			if (!fewAntipodals && alreadyTested(n1, n2, n3))
 				continue;
 
 			float minN2, maxN2;
@@ -2590,6 +2638,23 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				for(int s = 0; s < nSolutions; ++s) // O(constant), nSolutions == 0, 1 or 2.
 				{
 					TRACE_INC(edgeTripletsSolved);
+					// With many antipodal vertices to go through for the box: first a look at whether that is needed.
+					// The hull is at least as wide along each axis as it is from the vertex of the edge to the far
+					// vertex that the hints have for the opposite direction. If that already makes the box no
+					// smaller than the best one, there is nothing to measure. Nor is there if the orientation was
+					// tested a moment ago.
+					if (antipodalPointsForEdge[i].size() + antipodalPointsForEdge[edgeJ].size() + antipodalPointsForEdge[edgeK].size() >= 24)
+					{
+						const vec3 axes[3] = { n1[s], n2[s], n3[s] };
+						const int axisEdges[3] = { (int)i, edgeJ, edgeK };
+						float width[3];
+						for (int a = 0; a < 3; ++a)
+							width[a] = dot(axes[a], hull.v[edges[axisEdges[a]].first]) - dot(axes[a], hull.v[extremeVertexSearchHint(-axes[a])]);
+						if (width[0] > 0.f && width[1] > 0.f && width[2] > 0.f && width[0] * width[1] * width[2] >= minVolume)
+							continue;
+						if (alreadyTested(n1[s], n2[s], n3[s]))
+							continue;
+					}
 					TestThreeAdjacentFaces(n1[s], n2[s], n3[s], (int)i, edgeJ, edgeK, hull.v,
 						edges, antipodalPointsForEdge, &minVolume, &minOBB, boxProbe);
 				}
