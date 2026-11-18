@@ -867,6 +867,7 @@ static bool CanBePerpendicular(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a
 // of the third arc must have a normal that is perpendicular to a normal on the first arc, and one that is
 // perpendicular to a normal on the second arc, see CanBePerpendicular().
 // If the third axis can be on the arc, `range` is set to the part of the arc where: from f3b at 0 to f3a at 1.
+// (To one stretch of the arc that has all such parts: q can be within the tolerance on two parts of the arc.)
 static bool CanBeThirdAxis(const vec3 &f1a, const vec3 &f1b, const vec3 &e1, const vec3 &f2a, const vec3 &f2b, const vec3 &e2,
 	float e1e2, float tolerance, const vec3 &f3a, const vec3 &f3b, float arcLengthSq, float *range)
 {
@@ -920,6 +921,44 @@ static bool CanBeThirdAxis(const vec3 &f1a, const vec3 &f1b, const vec3 &e1, con
 				range[end] = fminf(roots[k], 1.f);
 		if (range[end] < 0.f)
 			return false;
+	}
+	// Between those two, q leaves the tolerance and comes back if its extreme value is there and beyond the
+	// tolerance. Then the third axis can only be on one of two parts of that range, and each part is tested on
+	// its own. (Tested as one range, an arc passes whenever one part has a normal that is perpendicular to a
+	// normal of the first arc and the other part has one that is perpendicular to a normal of the second arc.
+	// That matters on a hull that has a face of many edges: there q is zero at the normal of the face, at one
+	// end of the arc of each edge of the face, for pair after pair of edges, and once it is within the tolerance
+	// somewhere else on those arcs as well, all the edges of the face pass as third edges.)
+	if (a != 0.f)
+	{
+		const float extremeAt = -0.5f * b / a;
+		if (extremeAt > range[0] && extremeAt < range[1])
+		{
+			const float extreme = q0 + 0.5f * b * extremeAt;
+			if (fabsf(extreme) > tolerance)
+			{
+				// Where q is at the tolerance on its way to the extreme value and back.
+				const float c = q0 - (extreme > 0.f ? tolerance : -tolerance);
+				const float discriminant = b * b - 4.f * a * c;
+				if (discriminant > 0.f)
+				{
+					const float r = -0.5f * (b + (b < 0.f ? -1.f : 1.f) * sqrtf(discriminant));
+					const float low = fminf(r / a, c / r), high = fmaxf(r / a, c / r);
+					if (low >= range[0] && high <= range[1] && low < high)
+					{
+						const vec3 from = f3b + (f3a - f3b) * range[0], lowEnd = f3b + (f3a - f3b) * low;
+						const vec3 highEnd = f3b + (f3a - f3b) * high, to = f3b + (f3a - f3b) * range[1];
+						const bool first = CanBePerpendicular(f1a, f1b, from, lowEnd) && CanBePerpendicular(f2a, f2b, from, lowEnd);
+						const bool last = CanBePerpendicular(f1a, f1b, highEnd, to) && CanBePerpendicular(f2a, f2b, highEnd, to);
+						if (first && !last)
+							range[1] = low;
+						else if (last && !first)
+							range[0] = high;
+						return first || last;
+					}
+				}
+			}
+		}
 	}
 	const vec3 n3a = f3b + (f3a - f3b) * range[0], n3b = f3b + (f3a - f3b) * range[1];
 	return CanBePerpendicular(f1a, f1b, n3a, n3b) && CanBePerpendicular(f2a, f2b, n3a, n3b);
@@ -2544,6 +2583,79 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		return w * (1.0 - turn * turn * 0.5) - turn * sqrt(std::max(dot(d, d) - w * w, 0.0)) - widthMargin;
 	};
 
+	// A face of many edges has its normal at one end of the arc of each of its edges. When the third axis of a
+	// pair of edges is at that normal, all those edges are third edges that give one and the same box, and the
+	// search below would walk around the whole face through them, for pair after pair. Instead the box is
+	// tested once, and the search goes on from where the third axis does: it is on the curve q = 0 of the two
+	// edges, see CanBeThirdAxis(), which leaves the face normal along its tangent there, one way and the other.
+	// The normals that are that way from the face normal are those of the vertex of the face that is the
+	// farthest along that tangent, so that is the vertex whose other edges the third axis can cross next.
+	// For finding it, each face of many edges has the directions of the outward normals of its sides in the
+	// plane of the face, as angles: side k is from vertex k of the face to the next one, and the angles are
+	// stored from side sideAnglesFirst on, where they are in increasing order (around a convex polygon the
+	// normals of the sides turn one way). The vertex that is the farthest along a direction of the plane is the
+	// one between the two sides whose normals the direction is between.
+	const size_t manyEdges = 12;
+	bool anyFaceOfManyEdges = false;
+	for (int fi = 0; fi < F && !anyFaceOfManyEdges; ++fi)
+		anyFaceOfManyEdges = hull.f[fi].size() >= manyEdges;
+	std::vector<int> sideAnglesBegin(anyFaceOfManyEdges ? F : 0, -1), sideAnglesFirst(anyFaceOfManyEdges ? F : 0, 0);
+	std::vector<float> sideAngles;
+	auto planeOfFace = [&](int face, vec3 &u, vec3 &v)
+	{
+		vec3 w;
+		PerpendicularBasis(faceNormals[face], u, w);
+		v = cross(faceNormals[face], u);
+	};
+	if (anyFaceOfManyEdges)
+		for (int fi = 0; fi < F; ++fi)
+		{
+			const std::vector<int> &corners = hull.f[fi];
+			const size_t m = corners.size();
+			if (m < manyEdges)
+				continue;
+			vec3 u, v;
+			planeOfFace(fi, u, v);
+			sideAnglesBegin[fi] = (int)sideAngles.size();
+			size_t first = 0;
+			for (size_t k = 0; k < m; ++k)
+			{
+				const vec3 outward = cross(vtx[corners[(k + 1) % m]] - vtx[corners[k]], faceNormals[fi]);
+				sideAngles.push_back(atan2f(dot(outward, v), dot(outward, u)));
+				if (sideAngles.back() < sideAngles[sideAnglesBegin[fi] + first])
+					first = k;
+			}
+			sideAnglesFirst[fi] = (int)first;
+			std::rotate(sideAngles.begin() + sideAnglesBegin[fi], sideAngles.begin() + sideAnglesBegin[fi] + first, sideAngles.end());
+		}
+	// Returns the vertex of a face of many edges that is the farthest along the direction, as an index into the face.
+	auto farthestOfFace = [&](int fi, const vec3 &direction) -> int
+	{
+		const std::vector<int> &corners = hull.f[fi];
+		const int m = (int)corners.size();
+		vec3 u, v;
+		planeOfFace(fi, u, v);
+		const float angle = atan2f(dot(direction, v), dot(direction, u));
+		const float *angles = &sideAngles[sideAnglesBegin[fi]];
+		int j = (sideAnglesFirst[fi] + (int)(std::upper_bound(angles, angles + m, angle) - angles)) % m;
+		// (The angles are rounded: step on to the farthest vertex, should it be a neighbor.)
+		for (int step = 0; step < 8; ++step)
+		{
+			const float here = dot(direction, vtx[corners[j]]);
+			const int next = (j + 1) % m, previous = (j + m - 1) % m;
+			if (dot(direction, vtx[corners[next]]) > here)
+				j = next;
+			else if (dot(direction, vtx[corners[previous]]) > here)
+				j = previous;
+			else
+				break;
+		}
+		return j;
+	};
+	// For each face of many edges, the last pair of edges (by its running number) for which the search went on
+	// from the face like that, and the last pair for which it could not: where the curve has no tangent at the
+	// face normal, the search walks through the edges of the face as it does for other faces.
+	std::vector<size_t> faceWalkedOnForPair(anyFaceOfManyEdges ? F : 0, 0), faceWalkedAroundForPair(anyFaceOfManyEdges ? F : 0, 0);
 	std::vector<vec3> thirdAxes;
 	// For each face, the last pair of edges (by a running number) for which the box was tested whose third face
 	// is flush with the face.
@@ -2607,6 +2719,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		const float axisDot = dot(arcAxis[i], arcAxis[edgeJ]);
 		const float axisTolerance = 1e-5f;
 		++pairNumber;
+		// Whether the third edges are searched for by a walk over the hull: as opposed to trying a list of edges.
+		bool walking = false;
 		auto testThirdEdge = [&](int edgeK) -> bool
 		{
 			const vec3 &f3a = edgeNormalA[edgeK];
@@ -2619,17 +2733,52 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 
 			// If the third axis is at an end of the arc, it is the normal of a face of the hull, and all the
 			// edges of that face give the same box: one of them is enough.
+			bool firstOfFace = false;
 			if (range[1] < 1e-3f || range[0] > 1.f - 1e-3f)
 			{
 				const int face = range[1] < 1e-3f ? facesForEdge[edgeK].second : facesForEdge[edgeK].first;
-				if (faceTestedForPair[face] == pairNumber)
-					return true;
-				if (edgeJ < edgeK)
-					faceTestedForPair[face] = pairNumber;
+				if (walking && anyFaceOfManyEdges && sideAnglesBegin[face] >= 0 && faceWalkedAroundForPair[face] != pairNumber)
+				{
+					// A face of many edges: see sideAngles above.
+					if (faceWalkedOnForPair[face] == pairNumber)
+						return false; // The box of the face is tested, and the search has gone on from the face.
+					// The gradient of q at the face normal, in the tangent plane: the curve q = 0 goes across it.
+					const vec3 &normal = faceNormals[face];
+					vec3 gradient = normal * (2.f * axisDot) - arcAxis[i] * dot(arcAxis[edgeJ], normal) - arcAxis[edgeJ] * dot(arcAxis[i], normal);
+					gradient = gradient - normal * dot(gradient, normal);
+					if (LengthSq(gradient) >= 1e-6f)
+					{
+						faceWalkedOnForPair[face] = pairNumber;
+						const vec3 along = cross(normal, gradient);
+						const std::vector<int> &corners = hull.f[face];
+						const int m = (int)corners.size();
+						for (int side = 0; side < 2; ++side)
+						{
+							// (And the vertices next to it: for when the curve leaves along an edge of the face.)
+							const int j = farthestOfFace(face, side == 0 ? along : -along);
+							traverseStack.push_back(corners[(j + m - 1) % m]);
+							traverseStack.push_back(corners[j]);
+							traverseStack.push_back(corners[(j + 1) % m]);
+						}
+						// The box is tested with this edge, whichever way the edges J and K are ordered: the walk
+						// may not come to another edge of the face.
+						firstOfFace = true;
+						faceTestedForPair[face] = pairNumber;
+					}
+					else
+						faceWalkedAroundForPair[face] = pairNumber;
+				}
+				if (!firstOfFace)
+				{
+					if (faceTestedForPair[face] == pairNumber)
+						return true;
+					if (edgeJ < edgeK)
+						faceTestedForPair[face] = pairNumber;
+				}
 			}
 
 			// Test edge triplet i, edgeJ, edgeK.
-			if (edgeJ < edgeK && pairWidth * minWidth[edgeK] < minVolume && minVolumeForEdge[edgeK] < minVolume
+			if ((edgeJ < edgeK || firstOfFace) && pairWidth * minWidth[edgeK] < minVolume && minVolumeForEdge[edgeK] < minVolume
 				&& !AreEdgesBad(f1a, f1b, f3a, f3b) && !AreEdgesBad(f2a, f2b, f3a, f3b))
 			{
 				vec3 n1[2], n2[2], n3[2];
@@ -2726,6 +2875,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		// box of each family over those edges to their other vertices. (An edge is looked at only from the
 		// first of its vertices that the search comes to.)
 		CLEAR_GRAPH_SEARCH();
+		walking = true;
 		while(!traverseStack.empty())
 		{
 			int v = traverseStack.back();
