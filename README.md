@@ -160,5 +160,3 @@ int main()
 ```
 
 `minsphere()` takes a list of points like above, or a `Hull3` from `convex_hull()`: the sphere is the same. The returned sphere contains all the points, and its radius is the smallest possible to the precision of floats. `support` lists the two to four points that the sphere passes through and that define it.
-
-The implementation is adapted from `Sphere::OptimalEnclosingSphere()` of [MathGeoLib](https://github.com/juj/MathGeoLib), made robust (it has no tolerances, and any input is fine: points on a line, in a plane or all on one sphere, of any scale) and fast: it does not need the convex hull, and reads the points of a typical model about twice. A model of 15 million vertices takes 30 milliseconds on one thread of a desktop CPU, and the 6,933 test models (1.15 billion vertices) take 3 seconds in all, where their convex hulls take 75.
