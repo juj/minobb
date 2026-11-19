@@ -1744,7 +1744,10 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 		for (int v = 0; v < V && !any; ++v)
 			any = adjacencyData[v].size() >= manyEdgesOfVertex;
 		std::vector<std::pair<float, int> > byAngle;
-		std::vector<float> px, py, angles;
+		// (The corners are worked out in double precision: around a vertex of thousands of edges the polygon
+		// turns by so little from one side to the next that single precision would not tell which way.)
+		std::vector<double> px, py;
+		std::vector<float> angles;
 		for (int v = 0; any && v < V; ++v)
 		{
 			const std::vector<int> &neighbors = adjacencyData[v];
@@ -1773,15 +1776,15 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			bool usable = true;
 			for (size_t k = 0; k < m && usable; ++k)
 			{
-				const vec3 edge = vtx[neighbors[k]] - vtx[v];
-				const float scale = dot(edge, fan.axis);
-				usable = scale > 0.f && scale > 1e-6f * sqrtf(LengthSq(edge));
+				const dvec3 edge = dvec3(vtx[neighbors[k]]) - dvec3(vtx[v]);
+				const double scale = dot(edge, dvec3(fan.axis));
+				usable = scale > 0.0 && scale > 1e-6 * sqrt(dot(edge, edge));
 				if (!usable)
 					break;
-				fan.minScale = std::min(fan.minScale, scale);
-				px[k] = dot(edge, fan.u) / scale;
-				py[k] = dot(edge, fan.v) / scale;
-				fan.margin = std::max(fan.margin, 1e-5f * (1.f + fabsf(px[k]) + fabsf(py[k])));
+				fan.minScale = std::min(fan.minScale, (float)scale);
+				px[k] = dot(edge, dvec3(fan.u)) / scale;
+				py[k] = dot(edge, dvec3(fan.v)) / scale;
+				fan.margin = std::max(fan.margin, 1e-5f * (1.f + (float)fabs(px[k]) + (float)fabs(py[k])));
 				centerX += px[k];
 				centerY += py[k];
 			}
@@ -1800,7 +1803,7 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			for (size_t k = 0; k < m && usable; ++k)
 			{
 				const int a = byAngle[k].second, b = byAngle[(k + 1) % m].second, c = byAngle[(k + 2) % m].second;
-				const double sideX = (double)px[b] - px[a], sideY = (double)py[b] - py[a], nextX = (double)px[c] - px[b], nextY = (double)py[c] - py[b];
+				const double sideX = px[b] - px[a], sideY = py[b] - py[a], nextX = px[c] - px[b], nextY = py[c] - py[b];
 				usable = sideX * nextY - sideY * nextX > 0.0;
 				angles[k] = (float)atan2(-sideX, sideY);
 				if (angles[k] < angles[first])
@@ -1819,8 +1822,8 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 			{
 				const int corner = byAngle[(first + k) % m].second;
 				fans.slot.push_back(corner);
-				fans.x.push_back(px[corner]);
-				fans.y.push_back(py[corner]);
+				fans.x.push_back((float)px[corner]);
+				fans.y.push_back((float)py[corner]);
 				fans.sideAngle.push_back(angles[(first + k) % m]);
 			}
 			fans.fanOfVertex[v] = (int)fans.fans.size();
