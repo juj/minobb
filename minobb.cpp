@@ -1130,6 +1130,65 @@ static bool AreEdgesBad(const vec3 &f1a, const vec3 &f1b, const vec3 &f2a, const
 #endif
 }
 
+// The vertices of many edges, such as the apex of a cone: "fans". A climb, a check for ties and a search for third
+// edges all go through the edges of the vertex they are at, and where every other climb and search of the hull
+// comes to one vertex of hundreds of edges, that is where the time goes.
+// The edges of a vertex of a convex polyhedron are the rays of a convex cone. Cut by a plane that crosses them
+// all, the cone is a convex polygon with a corner on each edge. Along the edge of a corner a direction changes by
+// its change from the vertex to the corner, times how far the edge goes along the axis of the cone: so the
+// direction rises along some edge of the vertex if and only if it does to the corner that is the farthest along
+// it. That corner is found by bisection over the outward normals of the sides of the polygon, which are stored
+// as angles in increasing order, as for the faces of many edges in OptimalEnclosingOBB3D().
+struct Fans
+{
+	struct Fan
+	{
+		int vertex;
+		vec3 axis, u, v;   // The plane of the polygon is at 1 along the axis from the vertex; u and v span it.
+		float minScale;    // The least that an edge of the vertex goes along the axis.
+		float margin;      // What `along` of Farthest() has to exceed to be told from zero: by the size of the polygon.
+		int begin, count;  // Its entries in the arrays below, in the order of the polygon.
+		int tree;          // The root of its tree of caps, see capNodes in OptimalEnclosingOBB3D(), or -1.
+	};
+	std::vector<int> fanOfVertex; // For each vertex the index of its fan, or -1.
+	std::vector<Fan> fans;
+	std::vector<int> slot;        // Which neighbor of the vertex the corner is of: an index into its adjacency.
+	std::vector<float> x, y;      // The corner in the plane, from the axis.
+	std::vector<float> sideAngle; // Of the side from the corner to the next one.
+
+	// Returns the neighbor (as an index into the adjacency of the vertex) whose corner is the farthest along the
+	// direction, and sets `along` to how far that is from the vertex: if that is positive, the direction rises
+	// along the edge of that neighbor, and if it is negative, it rises along no edge of the vertex. (Zero: not
+	// known.)
+	int Farthest(const Fan &fan, const vec3 &direction, float &along) const
+	{
+		const float dx = dot(direction, fan.u), dy = dot(direction, fan.v);
+		const float *angles = &sideAngle[fan.begin];
+		int j = (int)(std::upper_bound(angles, angles + fan.count, atan2f(dy, dx)) - angles) % fan.count;
+		const float *px = &x[fan.begin], *py = &y[fan.begin];
+		// The angles are rounded: step on to the farthest corner, should it be a neighbor. (Around a convex
+		// polygon a corner that is farther than both of its neighbors is the farthest one.)
+		along = 0.f;
+		for (int step = 0; step < 8; ++step)
+		{
+			const float here = dx * px[j] + dy * py[j];
+			const int next = j + 1 < fan.count ? j + 1 : 0, previous = j > 0 ? j - 1 : fan.count - 1;
+			if (dx * px[next] + dy * py[next] > here)
+				j = next;
+			else if (dx * px[previous] + dy * py[previous] > here)
+				j = previous;
+			else
+			{
+				along = here + dot(direction, fan.axis);
+				break;
+			}
+		}
+		return slot[fan.begin + j];
+	}
+};
+// The fans of the hull that OptimalEnclosingOBB3D() is at work on in this thread, if it has any.
+static thread_local const Fans *fansOfHull = 0;
+
 static int ClimbAlong(const std::vector<vec3> &vtx, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, int startingVertex);
 
 // Sets `found` to the vertices of the hull that are the farthest along `direction`: to all the vertices that
@@ -1348,14 +1407,36 @@ static void TestThreeAdjacentFaces(const vec3 &n1, const vec3 &n2, const vec3 &n
 // `direction`, and returns the vertex that has no neighbor farther along it. On a convex polyhedron that is an
 // extreme vertex, unless the climb ends where vertices tie: see ExtremeVertexConvex(), which this is a cheaper
 // substitute for when any vertex that is far along the direction will do.
+// (At a vertex of many edges, see Fans, the climb goes on to the neighbor of the farthest corner instead of the
+// farthest neighbor. Either is farther than the vertex.)
 static int ClimbAlong(const std::vector<vec3> &vtx, const std::vector<std::vector<int> > &adjacencyData, const vec3 &direction, int startingVertex)
 {
+	const Fans * const fans = fansOfHull;
 	int v = startingVertex;
 	float d = dot(direction, vtx[v]);
 	for(;;)
 	{
 		const std::vector<int> &neighbors = adjacencyData[v];
 		int farthest = v;
+		// A vertex of many edges: the one neighbor to try, or none at all, unless it is too close to call.
+		if (fans && fans->fanOfVertex[v] >= 0)
+		{
+			const Fans::Fan &fan = fans->fans[fans->fanOfVertex[v]];
+			float along;
+			const int k = fans->Farthest(fan, direction, along);
+			if (along < -fan.margin)
+				return v;
+			if (along > fan.margin)
+			{
+				const float neighborD = dot(direction, vtx[neighbors[k]]);
+				if (neighborD > d)
+				{
+					d = neighborD;
+					v = neighbors[k];
+					continue;
+				}
+			}
+		}
 		for(size_t i = 0; i < neighbors.size(); ++i)
 		{
 			float neighborD = dot(direction, vtx[neighbors[i]]);
@@ -1389,6 +1470,17 @@ static int ExtremeVertexConvex(const Hull3 &hull, const std::vector<std::vector<
 		startingVertex = ClimbAlong(hull.v, adjacencyData, direction, startingVertex);
 		mostExtremeDistance = dot(direction, hull.v[startingVertex]);
 		const std::vector<int> &neighbors = adjacencyData[startingVertex];
+		// A vertex of many edges, see Fans: if the direction falls by enough even to the farthest corner, it
+		// falls by more than the tolerance along every edge, and no neighbor ties.
+		const Fans * const fans = fansOfHull;
+		if (fans && fans->fanOfVertex[startingVertex] >= 0)
+		{
+			const Fans::Fan &fan = fans->fans[fans->fanOfVertex[startingVertex]];
+			float along;
+			fans->Farthest(fan, direction, along);
+			if (along < -fan.margin && along * fan.minScale < -1.5f * plateauEpsilon)
+				return startingVertex;
+		}
 		bool tied = false;
 		for(size_t i = 0; i < neighbors.size() && !tied; ++i)
 			tied = dot(direction, hull.v[neighbors[i]]) >= mostExtremeDistance - plateauEpsilon;
@@ -1636,6 +1728,106 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	}
 
 	TRACE_FMT(t0, "obb: precompute adjacency+edges (V=%d F=%d E=%d)", V, F, (int)edges.size());
+
+	// The vertices of many edges, see Fans: from here on the climbs and the extreme vertex searches use them.
+	// (A vertex whose polygon does not come out convex and in order, as it can fail to when its edges are nearly
+	// in a plane, is left as it is: then its edges are gone through as those of any vertex.)
+	Fans fans;
+	struct FansInUse
+	{
+		FansInUse(const Fans *f) { fansOfHull = f; }
+		~FansInUse() { fansOfHull = 0; }
+	};
+	const size_t manyEdgesOfVertex = 24;
+	{
+		bool any = false;
+		for (int v = 0; v < V && !any; ++v)
+			any = adjacencyData[v].size() >= manyEdgesOfVertex;
+		std::vector<std::pair<float, int> > byAngle;
+		std::vector<float> px, py, angles;
+		for (int v = 0; any && v < V; ++v)
+		{
+			const std::vector<int> &neighbors = adjacencyData[v];
+			const size_t m = neighbors.size();
+			if (m < manyEdgesOfVertex)
+				continue;
+			Fans::Fan fan;
+			fan.vertex = v;
+			// The axis: against the normals of the faces around the vertex. Every edge of the vertex is in or
+			// below the plane of each of those faces, so every edge goes forward along the axis.
+			dvec3 sum;
+			for (size_t k = 0; k < m; ++k)
+			{
+				const std::pair<int, int> &faces = facesForEdge[adjacentEdges[v][k]];
+				sum = sum + dvec3(faceNormals[faces.first]) + dvec3(faceNormals[faces.second]);
+			}
+			fan.axis = (Normalized(sum) * -1.0).ToFloat();
+			vec3 w;
+			PerpendicularBasis(fan.axis, fan.u, w);
+			fan.v = cross(fan.axis, fan.u);
+			fan.minScale = FLT_MAX;
+			fan.margin = 0.f;
+			px.resize(m);
+			py.resize(m);
+			double centerX = 0.0, centerY = 0.0;
+			bool usable = true;
+			for (size_t k = 0; k < m && usable; ++k)
+			{
+				const vec3 edge = vtx[neighbors[k]] - vtx[v];
+				const float scale = dot(edge, fan.axis);
+				usable = scale > 0.f && scale > 1e-6f * sqrtf(LengthSq(edge));
+				if (!usable)
+					break;
+				fan.minScale = std::min(fan.minScale, scale);
+				px[k] = dot(edge, fan.u) / scale;
+				py[k] = dot(edge, fan.v) / scale;
+				fan.margin = std::max(fan.margin, 1e-5f * (1.f + fabsf(px[k]) + fabsf(py[k])));
+				centerX += px[k];
+				centerY += py[k];
+			}
+			if (!usable)
+				continue;
+			centerX /= (double)m;
+			centerY /= (double)m;
+			byAngle.resize(m);
+			for (size_t k = 0; k < m; ++k)
+				byAngle[k] = std::make_pair((float)atan2(py[k] - centerY, px[k] - centerX), (int)k);
+			std::sort(byAngle.begin(), byAngle.end());
+			// The sides: each has to turn left from the one before, and their angles have to be in increasing
+			// order from the first one on.
+			angles.resize(m);
+			size_t first = 0;
+			for (size_t k = 0; k < m && usable; ++k)
+			{
+				const int a = byAngle[k].second, b = byAngle[(k + 1) % m].second, c = byAngle[(k + 2) % m].second;
+				const double sideX = (double)px[b] - px[a], sideY = (double)py[b] - py[a], nextX = (double)px[c] - px[b], nextY = (double)py[c] - py[b];
+				usable = sideX * nextY - sideY * nextX > 0.0;
+				angles[k] = (float)atan2(-sideX, sideY);
+				if (angles[k] < angles[first])
+					first = k;
+			}
+			for (size_t k = 0; k + 1 < m && usable; ++k)
+				usable = angles[(first + k) % m] <= angles[(first + k + 1) % m];
+			if (!usable)
+				continue;
+			if (fans.fanOfVertex.empty())
+				fans.fanOfVertex.assign(V, -1);
+			fan.begin = (int)fans.slot.size();
+			fan.count = (int)m;
+			fan.tree = -1;
+			for (size_t k = 0; k < m; ++k)
+			{
+				const int corner = byAngle[(first + k) % m].second;
+				fans.slot.push_back(corner);
+				fans.x.push_back(px[corner]);
+				fans.y.push_back(py[corner]);
+				fans.sideAngle.push_back(angles[(first + k) % m]);
+			}
+			fans.fanOfVertex[v] = (int)fans.fans.size();
+			fans.fans.push_back(fan);
+		}
+	}
+	const FansInUse fansInUse(fans.fans.empty() ? 0 : &fans);
 
 	// Throughout the algorithm, internal edges (edges between coplanar faces) can all be discarded. The faces of
 	// the hull are its actual facets, so no two adjacent faces are exactly coplanar; but if their normals are
@@ -2656,6 +2848,64 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 	// from the face like that, and the last pair for which it could not: where the curve has no tangent at the
 	// face normal, the search walks through the edges of the face as it does for other faces.
 	std::vector<size_t> faceWalkedOnForPair(anyFaceOfManyEdges ? F : 0, 0), faceWalkedAroundForPair(anyFaceOfManyEdges ? F : 0, 0);
+	// For each vertex of many edges, see Fans, a tree of caps over the arcs of its edges, in their order around
+	// the vertex: a node has a cap of the unit sphere (a center, and the largest distance from it) that has the
+	// arcs of a range of consecutive edges, and its two children have the halves of the range. The search for the
+	// third edges goes through the tree instead of the edges: where q, see CanBeThirdAxis(), cannot be within the
+	// tolerance anywhere on a cap, none of the arcs in it can have the third axis.
+	// (A vertex that has an arc of over 90 degrees is left without: see where the tree is used.)
+	struct CapNode
+	{
+		vec3 center;
+		float radius;
+		int begin, end;   // The range of the edges, as entries of the fan.
+		int left, right;  // The children, or -1 for a leaf.
+	};
+	std::vector<CapNode> capNodes;
+	struct CapTree
+	{
+		static int Build(std::vector<CapNode> &nodes, const Fans &fans, const Fans::Fan &fan, const std::vector<int> &edgesOfVertex,
+			const std::vector<vec3> &arcMiddle, const std::vector<float> &arcChord, int begin, int end)
+		{
+			CapNode node;
+			node.begin = begin;
+			node.end = end;
+			node.left = node.right = -1;
+			dvec3 sum;
+			for (int k = begin; k < end; ++k)
+				sum = sum + dvec3(arcMiddle[edgesOfVertex[fans.slot[fan.begin + k]]]);
+			node.center = Normalized(sum).ToFloat();
+			// (An arc is within arcChord of its middle.)
+			node.radius = 0.f;
+			for (int k = begin; k < end; ++k)
+			{
+				const int edge = edgesOfVertex[fans.slot[fan.begin + k]];
+				node.radius = std::max(node.radius, sqrtf(LengthSq(arcMiddle[edge] - node.center)) + arcChord[edge]);
+			}
+			node.radius += 1e-6f;
+			const int index = (int)nodes.size();
+			nodes.push_back(node);
+			if (end - begin > 4)
+			{
+				const int middle = (begin + end) / 2;
+				const int left = Build(nodes, fans, fan, edgesOfVertex, arcMiddle, arcChord, begin, middle);
+				const int right = Build(nodes, fans, fan, edgesOfVertex, arcMiddle, arcChord, middle, end);
+				nodes[index].left = left;
+				nodes[index].right = right;
+			}
+			return index;
+		}
+	};
+	for (size_t fi = 0; fi < fans.fans.size(); ++fi)
+	{
+		Fans::Fan &fan = fans.fans[fi];
+		bool shortArcs = true;
+		for (int k = 0; k < fan.count && shortArcs; ++k)
+			shortArcs = arcLengthSq[adjacentEdges[fan.vertex][fans.slot[fan.begin + k]]] <= 2.f;
+		if (shortArcs)
+			fan.tree = CapTree::Build(capNodes, fans, fan, adjacentEdges[fan.vertex], arcMiddle, arcChord, 0, fan.count);
+	}
+	std::vector<int> capStack;
 	std::vector<vec3> thirdAxes;
 	// For each face, the last pair of edges (by a running number) for which the box was tested whose third face
 	// is flush with the face.
@@ -2884,6 +3134,39 @@ static OBB OptimalEnclosingOBB3D(const Hull3 &hull, const std::vector<vec3> &fac
 				continue;
 			MARK_VERTEX_VISITED(v);
 			const std::vector<int> &n = adjacencyData[v];
+			if (!fans.fans.empty() && fans.fanOfVertex[v] >= 0 && fans.fans[fans.fanOfVertex[v]].tree >= 0)
+			{
+				// A vertex of many edges: only the edges whose arcs are in a cap that the curve q = 0 can cross,
+				// see capNodes. On the unit sphere q is axisDot less the product of the dot products of the two
+				// arc axes with the normal, and over a cap that product is within the radius times the sum of the
+				// two dot products at the center and the radius of what it is at the center. (CanBeThirdAxis() has
+				// q on the chord of the arc: that is q on the sphere times a squared length, which is at least 1/2
+				// for an arc of up to 90 degrees. So twice the tolerance covers it.)
+				const Fans::Fan &fan = fans.fans[fans.fanOfVertex[v]];
+				capStack.clear();
+				capStack.push_back(fan.tree);
+				while (!capStack.empty())
+				{
+					const CapNode &node = capNodes[capStack.back()];
+					capStack.pop_back();
+					const float along1 = dot(arcAxis[i], node.center), along2 = dot(arcAxis[edgeJ], node.center);
+					if (fabsf(axisDot - along1 * along2) > 2.f * axisTolerance + 1e-6f + node.radius * (fabsf(along1) + fabsf(along2) + node.radius))
+						continue;
+					if (node.left >= 0)
+					{
+						capStack.push_back(node.right);
+						capStack.push_back(node.left);
+						continue;
+					}
+					for (int entry = node.begin; entry < node.end; ++entry)
+					{
+						const int k = fans.slot[fan.begin + entry];
+						if (!HAVE_VISITED_VERTEX(n[k]) && !IS_INTERNAL_EDGE(adjacentEdges[v][k]) && testThirdEdge(adjacentEdges[v][k]))
+							traverseStack.push_back(n[k]);
+					}
+				}
+				continue;
+			}
 			for(size_t k = 0; k < n.size(); ++k)
 				// Edges inside faces with 180 degrees dihedral angles can be ignored.
 				if (!HAVE_VISITED_VERTEX(n[k]) && !IS_INTERNAL_EDGE(adjacentEdges[v][k]) && testThirdEdge(adjacentEdges[v][k]))
